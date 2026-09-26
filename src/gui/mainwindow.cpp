@@ -78,6 +78,8 @@
 #include <QModelIndex>
 #include <QPushButton>
 #include <QSaveFile>
+#include <QSet>
+#include <QSignalBlocker>
 #include <QShortcut>
 #include <QSystemTrayIcon>
 #include <QTimer>
@@ -875,7 +877,7 @@ MainWindow::MainWindow(const ClipboardBrowserSharedPtr &sharedData, QWidget *par
 
 bool MainWindow::browseMode() const
 {
-    return ui->searchBar->isHidden();
+    return !m_searchMode;
 }
 
 QStringList MainWindow::copyqStats() const
@@ -1197,16 +1199,13 @@ void MainWindow::updateContextMenuTimeout()
     addItemAction( Actions::Item_ShowContent, this, &MainWindow::showItemContent );
     addItemAction( Actions::Item_Remove, c, &ClipboardBrowser::remove );
     addItemAction( Actions::Item_Edit, c, &ClipboardBrowser::editSelected );
-    addItemAction( Actions::Item_EditNotes, c, &ClipboardBrowser::editNotes );
-    addItemAction( Actions::Item_EditWithEditor, c, &ClipboardBrowser::openEditor );
-    addItemAction( Actions::Item_Action, this, &MainWindow::openActionDialog );
-
-    m_menuItem->addSeparator();
-
-    addItemAction( Actions::Item_MoveUp, this, &MainWindow::moveUp );
-    addItemAction( Actions::Item_MoveDown, this, &MainWindow::moveDown );
-    addItemAction( Actions::Item_MoveToTop, this, &MainWindow::moveToTop );
-    addItemAction( Actions::Item_MoveToBottom, this, &MainWindow::moveToBottom );
+    addItemAction( Actions::Item_EditNotes, c, &ClipboardBrowser::editNotes, false );
+    addItemAction( Actions::Item_EditWithEditor, c, &ClipboardBrowser::openEditor, false );
+    addItemAction( Actions::Item_Action, this, &MainWindow::openActionDialog, false );
+    addItemAction( Actions::Item_MoveUp, this, &MainWindow::moveUp, false );
+    addItemAction( Actions::Item_MoveDown, this, &MainWindow::moveDown, false );
+    addItemAction( Actions::Item_MoveToTop, this, &MainWindow::moveToTop, false );
+    addItemAction( Actions::Item_MoveToBottom, this, &MainWindow::moveToBottom, false );
 
     updateToolBar();
     updateActionShortcuts();
@@ -1482,7 +1481,7 @@ void MainWindow::onBrowserCreated(ClipboardBrowser *browser)
     connect( browser, &ClipboardBrowser::searchRequest,
              this, &MainWindow::findNextOrPrevious );
     connect( browser, &ClipboardBrowser::searchHideRequest,
-             ui->searchBar, &Utils::FilterLineEdit::hide );
+             this, &MainWindow::enterBrowseMode );
     connect( browser, &ClipboardBrowser::searchShowRequest,
              this, &MainWindow::onSearchShowRequest );
     connect( browser, &ClipboardBrowser::itemWidgetCreated,
@@ -1656,9 +1655,12 @@ void MainWindow::setFilter(const QString &text)
 {
     if ( text.isEmpty() ) {
         enterBrowseMode();
+        if (AppConfig().option<Config::search_tags_only>())
+            enterSearchMode();
     } else {
+        // enterSearchMode() already focuses the search bar; focusing the placeholder
+        // here left "search mode" active with the browser holding focus.
         enterSearchMode(text);
-        getPlaceholder()->setFocus();
     }
 }
 
@@ -1773,11 +1775,12 @@ QAction *MainWindow::addTrayAction(Actions::Id id)
 }
 
 template <typename Receiver, typename ReturnType>
-QAction *MainWindow::addItemAction(Actions::Id id, Receiver *receiver, ReturnType (Receiver::* slot)())
+QAction *MainWindow::addItemAction(Actions::Id id, Receiver *receiver, ReturnType (Receiver::* slot)(), bool addToMenu)
 {
     QAction *act = actionForMenuItem(id, getPlaceholder(), Qt::WidgetWithChildrenShortcut);
     connect( act, &QAction::triggered, receiver, slot, Qt::UniqueConnection );
-    m_menuItem->addAction(act);
+    if (addToMenu)
+        m_menuItem->addAction(act);
     return act;
 }
 
@@ -1812,6 +1815,31 @@ void MainWindow::addCommandsToItemMenu(ClipboardBrowser *c)
         std::tie(_rootMenu, currentMenu) = createSubMenus(&name, m_menuItem);
         auto act = new CommandAction(command, name, currentMenu);
         c->addAction(act);
+
+        // R5: commands 10/11 (Multi-Paste, Return / Shift+Return) and 15 (Close
+        // window, Ctrl+W) must keep firing as shortcuts, so they stay InMenu=true
+        // in the config and only their rows are hidden here. The action must stay
+        // in m_menuItem's action list (NOT removeAction): clearActions(m_menuItem)
+        // deletes CommandActions only via menu->actions() iteration, and a removed
+        // action would leak and stack duplicate shortcuts on every menu rebuild.
+        // updateActionShortcuts() skips an action only when it is BOTH disabled
+        // and invisible, so setVisible(false) alone keeps the shortcuts bound.
+        // The InMenu=false route in copyq-commands.ini does NOT work: CopyQ
+        // re-serialises the file on every start and resets InMenu to true, so an
+        // external edit is silently reverted (measured 2026-09-06, twice).
+        static const QSet<QString> hiddenRows = {
+            QStringLiteral("copyq_multi_paste"),
+            QStringLiteral("copyq_multi_paste_shift"),
+            QStringLiteral("Close window"),
+            QStringLiteral("copyq_pinned_pin"),
+            QStringLiteral("copyq_pinned_unpin"),
+            QStringLiteral("copyq_tags_tag:Important"),
+            QStringLiteral("copyq_tags_untag:Important"),
+            QStringLiteral("copyq_tags_untag"),
+            QStringLiteral("copyq_tags_clear"),
+        };
+        if ( hiddenRows.contains(command.internalId) || hiddenRows.contains(name) )
+            act->setVisible(false);
 
         addMenuMatchCommand(&m_itemMenuMatchCommands, command.matchCmd, act);
 
@@ -3122,6 +3150,7 @@ void MainWindow::loadSettings(QSettings &settings, AppConfig *appConfig)
 
     m_options.hideMainWindow = appConfig->option<Config::hide_main_window>();
     m_options.closeOnUnfocus = appConfig->option<Config::close_on_unfocus>();
+    m_options.keepMainWindowOpen = appConfig->option<Config::keep_main_window_open>();
 
     WindowFlags flags(this);
     const bool alwaysOnTop = appConfig->option<Config::always_on_top>();
@@ -3242,6 +3271,9 @@ void MainWindow::showWindow()
             c->scrollTo( c->currentIndex() );
         c->setFocus();
     }
+
+    if (AppConfig().option<Config::search_tags_only>() && c && !c->isInternalEditorOpen())
+        enterSearchMode();
 
     raiseWindow(this);
 }
@@ -3777,16 +3809,22 @@ void MainWindow::activateCurrentItem()
 
 void MainWindow::activateCurrentItemHelper()
 {
+    auto c = browser();
+    if (!c)
+        return;
+
+    // Filtering can retain a selected index whose row is no longer visible.
+    // Never activate that hidden item when Enter is pressed on an empty result.
+    const auto current = c->currentIndex();
+    if (!current.isValid() || c->isRowHidden(current.row()))
+        return;
+
     if ( QApplication::queryKeyboardModifiers() == Qt::NoModifier
          && isItemMenuDefaultActionValid() )
     {
         m_menuItem->defaultAction()->trigger();
         return;
     }
-
-    auto c = browser();
-    if (!c)
-        return;
 
     // Perform custom actions on item activation.
     PlatformWindowPtr lastWindow = m_windowForMainPaste;
@@ -3798,7 +3836,7 @@ void MainWindow::activateCurrentItemHelper()
     // activate target window for pasting.
     c->moveToClipboard();
 
-    if ( m_options.activateCloses() )
+    if ( m_options.activateCloses() && !m_options.keepMainWindowOpen )
         hideWindow();
 
     if (lastWindow && activateWindow)
@@ -4081,8 +4119,11 @@ void MainWindow::findNextOrPrevious()
 
 void MainWindow::enterBrowseMode()
 {
+    m_searchMode = false;
     getPlaceholder()->setFocus();
-    ui->searchBar->hide();
+    const QSignalBlocker blocker(ui->searchBar);
+    ui->searchBar->clear();
+    ui->searchBar->show();
 
     auto c = browserOrNull();
     if (c)
@@ -4091,6 +4132,7 @@ void MainWindow::enterBrowseMode()
 
 void MainWindow::enterSearchMode()
 {
+    m_searchMode = true;
     ui->searchBar->show();
     ui->searchBar->setFocus(Qt::ShortcutFocusReason);
 
@@ -4104,6 +4146,7 @@ void MainWindow::enterSearchMode()
 
 void MainWindow::enterSearchMode(const QString &txt)
 {
+    m_searchMode = true;
     ui->searchBar->show();
     ui->searchBar->setFocus(Qt::ShortcutFocusReason);
     ui->searchBar->setText(txt);

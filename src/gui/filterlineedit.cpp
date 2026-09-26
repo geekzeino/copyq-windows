@@ -403,6 +403,7 @@ ItemFilterPtr FilterLineEdit::filter() const
 void FilterLineEdit::loadSettings()
 {
     AppConfig appConfig;
+    setPlaceholderText(appConfig.option<Config::search_tags_only>() ? tr("Search tags") : QString());
 
     const bool filterRegEx = appConfig.option<Config::filter_regular_expression>();
     m_actionRe->setChecked(filterRegEx);

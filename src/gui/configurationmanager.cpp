@@ -327,6 +327,8 @@ void ConfigurationManager::initOptions()
 #endif
 
     bind<Config::hide_main_window_in_task_bar>();
+    bind<Config::keep_main_window_open>();
+    bind<Config::search_tags_only>();
     bind<Config::max_process_manager_rows>();
     bind<Config::show_advanced_command_settings>();
     bind<Config::text_tab_width>();

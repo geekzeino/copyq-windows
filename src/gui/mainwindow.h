@@ -97,6 +97,7 @@ struct MainWindowOptions {
 
     bool hideMainWindow = false;
     bool closeOnUnfocus = false;
+    bool keepMainWindowOpen = true;
 
     int itemActivationCommands = ActivateCloses;
 
@@ -114,8 +115,8 @@ struct MainWindowOptions {
  * Each tab contains one clipboard browser widget.
  *
  * It operates in two modes:
- *  * browse mode with search bar hidden and empty (default) and
- *  * search mode with search bar shown and not empty.
+ *  * browse mode with search bar visible and inactive (default) and
+ *  * search mode with search bar visible and focused.
  *
  * If user starts typing text the search mode will become active and
  * the search bar focused.
@@ -132,7 +133,7 @@ public:
 
     ~MainWindow();
 
-    /** Return true if in browse mode (i.e. search field is hidden). */
+    /** Return true if in browse mode. */
     bool browseMode() const;
 
     /**
@@ -615,7 +616,7 @@ private:
     QAction *addTrayAction(Actions::Id id);
 
     template <typename Receiver, typename ReturnType>
-    QAction *addItemAction(Actions::Id id, Receiver *receiver, ReturnType (Receiver::* slot)());
+    QAction *addItemAction(Actions::Id id, Receiver *receiver, ReturnType (Receiver::* slot)(), bool addToMenu = true);
 
     QVector<Command> commandsForMenu(const QVariantMap &data, const QString &tabName, const QVector<Command> &allCommands);
     void addCommandsToItemMenu(ClipboardBrowser *c);
@@ -755,6 +756,7 @@ private:
     bool m_isActiveWindow = false;
     bool m_singleClickActivate = 0;
     bool m_enteringSearchMode = false;
+    bool m_searchMode = false;
 
     QVector<int> m_overrides;
     int m_maxEventHandlerScripts = 10;

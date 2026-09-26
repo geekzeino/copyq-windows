@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "clipboardbrowser.h"
+#include "common/appconfig.h"
 
 #include "common/common.h"
 #include "common/contenttype.h"
@@ -1308,7 +1309,7 @@ void ClipboardBrowser::filterBatch(int filterId, const QPersistentModelIndex &la
 
 int ClipboardBrowser::currentRowFromSearch(const QString &search)
 {
-    if (m_sharedData->numberSearch)
+    if (m_sharedData->numberSearch || AppConfig().option<Config::search_tags_only>())
         return -1;
 
     // If search string is a number, highlight item in that row.

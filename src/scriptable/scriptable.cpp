@@ -900,6 +900,12 @@ QJSValue Scriptable::focused()
     return m_proxy->isMainWindowFocused();
 }
 
+QJSValue Scriptable::focusWidgetName()
+{
+    m_skipArguments = 0;
+    return m_proxy->focusWidgetName();
+}
+
 QJSValue Scriptable::focusPrevious()
 {
     m_skipArguments = 0;

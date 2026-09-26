@@ -131,6 +131,12 @@ struct number_search : Config<bool> {
     static Value defaultValue() { return false; }
 };
 
+struct search_tags_only : Config<bool> {
+    static QString name() { return QStringLiteral("search_tags_only"); }
+    static Value defaultValue() { return false; }
+    static const char *description() { return "Search item tags only (exclude text, notes and formats)"; }
+};
+
 struct check_clipboard : Config<bool> {
     static QString name() { return QStringLiteral("check_clipboard"); }
     static Value defaultValue() { return true; }
@@ -172,6 +178,14 @@ struct always_on_top : Config<bool> {
 struct close_on_unfocus : Config<bool> {
     static QString name() { return QStringLiteral("close_on_unfocus"); }
     static Value defaultValue() { return true; }
+};
+
+struct keep_main_window_open : Config<bool> {
+    static QString name() { return QStringLiteral("keep_main_window_open"); }
+    static Value defaultValue() { return true; }
+    static const char *description() {
+        return "Keep the main window open after activating an item";
+    }
 };
 
 struct close_on_unfocus_delay_ms : Config<int> {

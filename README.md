@@ -1,3 +1,29 @@
+# CopyQ for Windows (patched)
+
+A Windows build of [CopyQ](https://github.com/hluk/CopyQ) 14.0.0 with a few changes:
+
+- The search bar stays visible; optional tag-only search (`search_tags_only`).
+- The window stays open after pasting an item (`keep_main_window_open`).
+- Tagged items are never dropped when the history is full.
+- A shorter item menu; Enter on an empty search result does nothing.
+- Comes with commands for pinning, tags, and Ctrl+W to close the window.
+
+## Install
+
+Open PowerShell and run:
+
+```powershell
+irm https://raw.githubusercontent.com/geekzeino/copyq-windows/master/install.ps1 | iex
+```
+
+No admin rights needed. CopyQ installs for the current user and starts at sign-in.
+The installer is also on the [Releases](https://github.com/geekzeino/copyq-windows/releases/latest) page.
+Remove it from Settings > Apps like any other program.
+
+Licensed under GPL-3.0, like upstream CopyQ. The original README follows.
+
+---
+
 # CopyQ
 
 [![Documentation Status](https://readthedocs.org/projects/copyq/badge/?version=latest)](https://copyq.readthedocs.io/en/latest/?badge=latest)

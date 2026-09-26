@@ -601,7 +601,8 @@ bool ItemTagsSaver::canRemoveItems(const QList<QModelIndex> &indexList, QString 
 
 bool ItemTagsSaver::canDropItem(const QModelIndex &index)
 {
-    return !isLocked(index, m_tags) && ItemSaverWrapper::canDropItem(index);
+    return ::tags(index.data(contentType::data).toMap()).isEmpty()
+            && ItemSaverWrapper::canDropItem(index);
 }
 
 bool ItemTagsSaver::canMoveItems(const QList<QModelIndex> &indexList)
@@ -683,11 +684,8 @@ ItemWidget *ItemTagsLoader::transform(ItemWidget *itemWidget, const QVariantMap 
 
 ItemSaverPtr ItemTagsLoader::transformSaver(const ItemSaverPtr &saver, QAbstractItemModel *)
 {
-    // Avoid checking for locked items if no locked tags are specified in configuration.
-    const bool hasAnyLocks = std::any_of(
-        std::begin(m_tags), std::end(m_tags),
-        [](const ItemTags::Tag &tag){ return tag.lock; });
-    return hasAnyLocks ? std::make_shared<ItemTagsSaver>(m_tags, saver) : saver;
+    // Installed even with no locked tags: tagged items must never be evicted by the size cap.
+    return std::make_shared<ItemTagsSaver>(m_tags, saver);
 }
 
 bool ItemTagsLoader::matches(const QModelIndex &index, const ItemFilter &filter) const

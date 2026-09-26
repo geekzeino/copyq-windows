@@ -481,6 +481,16 @@ ItemSaverPtr ItemFactory::initializeTab(const QString &tabName, QAbstractItemMod
 
 bool ItemFactory::matches(const QModelIndex &index, const ItemFilter &filter) const
 {
+    if ( AppConfig().option<Config::search_tags_only>() ) {
+        const auto tags = QString::fromUtf8(index.data(contentType::data).toMap()
+            .value(QStringLiteral("application/x-copyq-tags")).toByteArray());
+        for (const auto &tag : tags.split(QLatin1Char(','))) {
+            if ( !tag.isEmpty() && (filter.matches(tag) || filter.matches(accentsRemoved(tag))) )
+                return true;
+        }
+        return false;
+    }
+
     if ( filter.matchesIndex(index) )
         return true;
 

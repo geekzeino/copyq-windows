@@ -176,6 +176,7 @@ public slots:
     QJSValue monitoring();
     QJSValue visible();
     QJSValue focused();
+    QJSValue focusWidgetName();
 
     QJSValue focusPrevious();
 

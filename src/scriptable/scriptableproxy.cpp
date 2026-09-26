@@ -965,6 +965,23 @@ bool ScriptableProxy::isMainWindowFocused()
     return m_wnd->isActiveWindow();
 }
 
+QString ScriptableProxy::focusWidgetName()
+{
+    INVOKE(focusWidgetName, ());
+    const auto describe = [](QWidget *w) -> QString {
+        if (!w)
+            return QStringLiteral("(none)");
+        return QStringLiteral("%1[%2]")
+            .arg(QString::fromLatin1(w->metaObject()->className()), w->objectName());
+    };
+    // QApplication::focusWidget() is null whenever no window is active, which is always true in a
+    // headless nest. m_wnd->focusWidget() reports the window's designated focus widget regardless.
+    return QStringLiteral("app=%1 win=%2 active=%3")
+        .arg( describe(QApplication::focusWidget()),
+              describe(m_wnd->focusWidget()),
+              m_wnd->isActiveWindow() ? QStringLiteral("1") : QStringLiteral("0") );
+}
+
 bool ScriptableProxy::preview(const QVariant &arg)
 {
     INVOKE(preview, (arg));

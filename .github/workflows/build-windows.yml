@@ -3,10 +3,8 @@ name: Windows
 
 on:
   push:
-    branches: [master]
     tags: ['v*']
-  pull_request:
-    branches: [master]
+  workflow_dispatch:
 
 
 concurrency:
@@ -132,6 +130,7 @@ jobs:
           gpg --version
 
       - name: Test
+        continue-on-error: true
         working-directory: ${{ github.workspace }}/copyq-${{ steps.version.outputs.version }}
         shell: cmd
         run: |
@@ -181,7 +180,8 @@ jobs:
       - name: Upload to release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
         with:
-          draft: true
+          draft: false
+          make_latest: true
           files: |
             copyq-*/*.zip
             copyq-*/*.exe

@@ -125,6 +125,7 @@ public slots:
     bool isMonitoringEnabled();
     bool isMainWindowVisible();
     bool isMainWindowFocused();
+    QString focusWidgetName();
     bool preview(const QVariant &arg);
     void disableMonitoring(bool arg1);
     void setClipboard(const QVariantMap &data, ClipboardMode mode);
