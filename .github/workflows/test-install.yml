@@ -1,0 +1,33 @@
+---
+name: Test install
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  install:
+    runs-on: windows-2025
+    steps:
+      - name: Run the one-line installer
+        shell: powershell
+        run: irm https://raw.githubusercontent.com/geekzeino/copyq-windows/master/install.ps1 | iex
+
+      - name: Check the installed app
+        shell: powershell
+        run: |
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{9DF1F443-EA0B-4C75-A4D3-767A7783228E}_is1'
+          $exe = Join-Path (Get-ItemProperty $key).InstallLocation 'copyq.exe'
+          & $exe --version | Out-String | Write-Host
+          $names = (& $exe eval "print(commands().map(function(c){return c.name}).join('\n'))" | Out-String)
+          Write-Host $names
+          foreach ($n in 'Pin', 'Unpin', 'Close window', 'Add a Tag') {
+            if ($names -notmatch [regex]::Escape($n)) { throw "Missing command: $n" }
+          }
+          $opt = (& $exe config keep_main_window_open | Out-String).Trim()
+          if ($opt -ne 'true') { throw "Patched option missing: keep_main_window_open=$opt" }
+          if (-not (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\CopyQ.lnk")) {
+            throw 'Autostart shortcut missing'
+          }
+          Write-Host 'Install check passed.'
