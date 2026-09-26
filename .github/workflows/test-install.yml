@@ -20,7 +20,7 @@ jobs:
           $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{9DF1F443-EA0B-4C75-A4D3-767A7783228E}_is1'
           $exe = Join-Path (Get-ItemProperty $key).InstallLocation 'copyq.exe'
           & $exe --version | Out-String | Write-Host
-          $names = (& $exe eval "print(commands().map(function(c){return c.name}).join('\n'))" | Out-String)
+          $names = (& $exe eval "print(commands().map(function(c){return c.name}).join('|'))" | Out-String)
           Write-Host $names
           foreach ($n in 'Pin', 'Unpin', 'Close window', 'Add a Tag') {
             if ($names -notmatch [regex]::Escape($n)) { throw "Missing command: $n" }
