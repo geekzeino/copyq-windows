@@ -17,13 +17,16 @@ function Get-CopyQExe {
     return $null
 }
 
-$release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
-$asset = $release.assets | Where-Object name -like '*-setup.exe' | Select-Object -First 1
-if (-not $asset) { throw "No installer found in the latest release of $repo." }
+# Resolve the latest tag from the releases/latest redirect; the REST API is rate-limited.
+$latest = Invoke-WebRequest "https://github.com/$repo/releases/latest" -UseBasicParsing -Method Head
+$uri = if ($latest.BaseResponse.ResponseUri) { $latest.BaseResponse.ResponseUri } else { $latest.BaseResponse.RequestMessage.RequestUri }
+$tag = $uri.Segments[-1].Trim('/')
+if ($tag -notmatch '^v\d') { throw "Could not find the latest release of $repo." }
+$name = "copyq-$($tag.Substring(1))-setup.exe"
 
-$setup = Join-Path $env:TEMP $asset.name
-Write-Host "Downloading $($asset.name)..."
-Invoke-WebRequest $asset.browser_download_url -OutFile $setup
+$setup = Join-Path $env:TEMP $name
+Write-Host "Downloading $name..."
+Invoke-WebRequest "https://github.com/$repo/releases/download/$tag/$name" -UseBasicParsing -OutFile $setup
 
 # Ask a running CopyQ to quit so the installer can replace its files.
 $old = Get-CopyQExe
@@ -52,7 +55,7 @@ if (-not $ready) { throw 'CopyQ did not start.' }
 
 # Add the bundled commands (pin, tags, Ctrl+W close, ...) that are not already present.
 $ini = Join-Path $env:TEMP 'copyq-commands.ini'
-Invoke-WebRequest "https://raw.githubusercontent.com/$repo/master/windows/copyq-commands.ini" -OutFile $ini
+Invoke-WebRequest "https://raw.githubusercontent.com/$repo/master/windows/copyq-commands.ini" -UseBasicParsing -OutFile $ini
 $path = $ini -replace '\\', '/'
 $js = "var f = new File('$path'); f.openReadOnly(); var add = importCommands(str(f.readAll())); f.close();" +
       " var have = commands().map(function(c) { return c.name; });" +
@@ -63,4 +66,4 @@ if ($LASTEXITCODE -ne 0) { Write-Warning 'Could not add the bundled commands.' }
 Remove-Item $ini -ErrorAction SilentlyContinue
 
 & $exe show | Out-Null
-Write-Host "CopyQ $($release.tag_name) installed. It starts automatically at sign-in."
+Write-Host "CopyQ $tag installed. It starts automatically at sign-in."
