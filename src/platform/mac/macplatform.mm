@@ -1,0 +1,290 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include "macplatform.h"
+#include "cfref.h"
+
+#include "app/applicationexceptionhandler.h"
+#include "common/log.h"
+#include "copyqpasteboardmime.h"
+#include "foregroundbackgroundfilter.h"
+#include "macplatformwindow.h"
+#include "platform/mac/macactivity.h"
+#include "urlpasteboardmime.h"
+#include "macclipboard.h"
+
+#include <QApplication>
+#include <QCoreApplication>
+#include <QDir>
+#include <QGuiApplication>
+#include <QScopedPointer>
+#include <QStringList>
+
+#include <Cocoa/Cocoa.h>
+#include <Carbon/Carbon.h>
+#include <mach/mach.h>
+
+namespace {
+    class ClipboardApplication : public QApplication
+    {
+    public:
+        ClipboardApplication(int &argc, char **argv)
+            : QApplication(argc, argv)
+            , m_pasteboardMime()
+            , m_pasteboardMimeUrl(QLatin1String("public.url"))
+            , m_pasteboardMimeFileUrl(QLatin1String("public.file-url"))
+        {
+        }
+
+    private:
+        CopyQPasteboardMime m_pasteboardMime;
+        UrlPasteboardMime m_pasteboardMimeUrl;
+        UrlPasteboardMime m_pasteboardMimeFileUrl;
+    };
+
+    template<typename T> inline T* objc_cast(id from)
+    {
+        if (from && [from isKindOfClass:[T class]]) {
+            return static_cast<T*>(from);
+        }
+        return nil;
+    }
+
+    bool isApplicationInItemList(LSSharedFileListRef list) {
+        bool flag = false;
+        UInt32 seed;
+        CFRef<CFArrayRef> items = LSSharedFileListCopySnapshot(list, &seed);
+        if (items) {
+            CFURLRef url = (__bridge CFURLRef)[NSURL fileURLWithPath:[[NSBundle mainBundle] bundlePath]];
+            if (url) {
+                for (id item in(__bridge NSArray *) items.get()) {
+                    LSSharedFileListItemRef itemRef = (__bridge LSSharedFileListItemRef)item;
+                    if (LSSharedFileListItemResolve(itemRef, 0, &url, NULL) == noErr) {
+                        if ([[(__bridge NSURL *) url path] hasPrefix:[[NSBundle mainBundle] bundlePath]]) {
+                            flag = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        return flag;
+    }
+
+    void addToLoginItems()
+    {
+        CFRef<LSSharedFileListRef> list = LSSharedFileListCreate(kCFAllocatorDefault, kLSSharedFileListSessionLoginItems, NULL);
+        if (list) {
+            if (!isApplicationInItemList(list)) {
+                CFURLRef url = (__bridge CFURLRef)[NSURL fileURLWithPath:[[NSBundle mainBundle] bundlePath]];
+                if (url) {
+                    // Don't "Hide on Launch", as we don't have a window to show anyway
+                    NSDictionary *properties = [NSDictionary
+                        dictionaryWithObject: [NSNumber numberWithBool:NO]
+                        forKey: @"com.apple.loginitem.HideOnLaunch"];
+                    CFRef<LSSharedFileListItemRef> item = LSSharedFileListInsertItemURL(list, kLSSharedFileListItemLast, NULL, NULL, url, (__bridge CFDictionaryRef)properties, NULL);
+                    (void)item;  // released automatically
+                } else {
+                    ::log("Unable to find url for bundle, can't auto-load app", LogWarning);
+                }
+            }
+        } else {
+            ::log("Unable to access shared file list, can't auto-load app", LogWarning);
+        }
+    }
+
+    void removeFromLoginItems()
+    {
+        CFRef<LSSharedFileListRef> list = LSSharedFileListCreate(kCFAllocatorDefault, kLSSharedFileListSessionLoginItems, NULL);
+        if (list) {
+            if (isApplicationInItemList(list)) {
+                CFURLRef url = (__bridge CFURLRef)[NSURL fileURLWithPath:[[NSBundle mainBundle] bundlePath]];
+                if (url) {
+                    UInt32 seed;
+                    CFRef<CFArrayRef> items = LSSharedFileListCopySnapshot(list, &seed);
+                    if (items) {
+                        for (id item in(__bridge NSArray *) items.get()) {
+                            LSSharedFileListItemRef itemRef = (__bridge LSSharedFileListItemRef)item;
+                            if (LSSharedFileListItemResolve(itemRef, 0, &url, NULL) == noErr)
+                                if ([[(__bridge NSURL *) url path] hasPrefix:[[NSBundle mainBundle] bundlePath]])
+                                    LSSharedFileListItemRemove(list, itemRef);
+                        }
+                    } else {
+                        ::log("No items in list of auto-loaded apps, can't stop auto-load of app", LogWarning);
+                    }
+                } else {
+                    ::log("Unable to find url for bundle, can't stop auto-load of app", LogWarning);
+                }
+            }
+        } else {
+            ::log("Unable to access shared file list, can't stop auto-load of app", LogWarning);
+        }
+    }
+
+    QString absoluteResourcesePath(const QString &path)
+    {
+        return QCoreApplication::applicationDirPath() + "/../Resources/" + path;
+    }
+
+    template <typename QtApplication>
+    class Activity
+        : public MacActivity
+        , public ApplicationExceptionHandler<QtApplication>
+    {
+    public:
+        Activity(int &argc, char **argv, const QString &reason)
+            : MacActivity(reason)
+            , ApplicationExceptionHandler<QtApplication>(argc, argv)
+        {
+            [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
+        }
+    };
+
+} // namespace
+
+PlatformNativeInterface *platformNativeInterface()
+{
+    static MacPlatform platform;
+    return &platform;
+}
+
+MacPlatform::MacPlatform()
+{
+}
+
+QCoreApplication *MacPlatform::createConsoleApplication(int &argc, char **argv)
+{
+    return new ApplicationExceptionHandler<QCoreApplication>(argc, argv);
+}
+
+QApplication *MacPlatform::createServerApplication(int &argc, char **argv)
+{
+    QApplication *app = new Activity<ClipboardApplication>(argc, argv, "CopyQ Server");
+
+    // Switch the app to foreground when in foreground
+    ForegroundBackgroundFilter::installFilter(app);
+
+    return app;
+}
+
+QGuiApplication *MacPlatform::createClipboardProviderApplication(int &argc, char **argv)
+{
+    return new Activity<ClipboardApplication>(argc, argv, "CopyQ clipboard provider");
+}
+
+QCoreApplication *MacPlatform::createClientApplication(int &argc, char **argv)
+{
+    return new Activity<QCoreApplication>(argc, argv, "CopyQ Client");
+}
+
+QGuiApplication *MacPlatform::createTestApplication(int &argc, char **argv)
+{
+    return new Activity<QGuiApplication>(argc, argv, "CopyQ Tests");
+}
+
+PlatformClipboardPtr MacPlatform::clipboard()
+{
+    return PlatformClipboardPtr(new MacClipboard());
+}
+
+QStringList MacPlatform::getCommandLineArguments(int argc, char **argv)
+{
+    QStringList arguments;
+
+    for (int i = 1; i < argc; ++i)
+        arguments.append( QString::fromUtf8(argv[i]) );
+
+    return arguments;
+}
+
+bool MacPlatform::findPluginDir(QDir *pluginsDir)
+{
+    pluginsDir->setPath( qApp->applicationDirPath() );
+    if (pluginsDir->dirName() != "MacOS") {
+        return pluginsDir->cd("plugins");
+    }
+
+    if ( pluginsDir->cdUp() // Contents
+            && pluginsDir->cd("PlugIns")
+            && pluginsDir->cd("copyq"))
+    {
+        return true;
+    }
+
+    pluginsDir->setPath( qApp->applicationDirPath() );
+
+    if ( pluginsDir->cdUp() // Contents
+            && pluginsDir->cdUp() // copyq.app
+            && pluginsDir->cdUp() // repo root
+            && pluginsDir->cd("plugins"))
+    {
+        return true;
+    }
+
+    return false;
+}
+
+QString MacPlatform::defaultEditorCommand()
+{
+    return "open -t -W -n %1";
+}
+
+QString MacPlatform::translationPrefix()
+{
+    return absoluteResourcesePath("translations");
+}
+
+QString MacPlatform::themePrefix()
+{
+    return absoluteResourcesePath("themes");
+}
+
+PlatformWindowPtr MacPlatform::getCurrentWindow()
+{
+    // FIXME: frontmostApplication doesn't seem to work well for own windows (at least in tests).
+    auto window = QApplication::activeWindow();
+    if (window == nullptr)
+        window = QApplication::activeModalWidget();
+    if (window != nullptr)
+        return PlatformWindowPtr(new MacPlatformWindow(window->winId()));
+
+    NSRunningApplication *runningApp = [[NSWorkspace sharedWorkspace] frontmostApplication];
+    return PlatformWindowPtr(new MacPlatformWindow(runningApp));
+}
+
+PlatformWindowPtr MacPlatform::getWindow(WId winId) {
+    return PlatformWindowPtr(new MacPlatformWindow(winId));
+}
+
+bool MacPlatform::isAutostartEnabled()
+{
+    // Note that this will need to be done differently if CopyQ goes into
+    // the App Store.
+    // http://rhult.github.io/articles/sandboxed-launch-on-login/
+    bool isInList = false;
+    CFRef<LSSharedFileListRef> list = LSSharedFileListCreate(kCFAllocatorDefault, kLSSharedFileListSessionLoginItems, NULL);
+    if (list) {
+        isInList = isApplicationInItemList(list);
+    }
+    return isInList;
+}
+
+void MacPlatform::setAutostartEnabled(bool shouldEnable)
+{
+    if (shouldEnable != isAutostartEnabled()) {
+        if (shouldEnable) {
+            addToLoginItems();
+        } else {
+            removeFromLoginItems();
+        }
+    }
+}
+
+qint64 MacPlatform::processResidentMemoryBytes()
+{
+    struct mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  (task_info_t)&info, &count) != KERN_SUCCESS)
+        return -1;
+    return static_cast<qint64>(info.resident_size);
+}

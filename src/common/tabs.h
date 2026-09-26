@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#pragma once
+
+
+#include <QString>
+#include <QtContainerFwd>
+
+#include <memory>
+
+class QSettings;
+
+struct TabProperties {
+    QString name;
+    QString iconName;
+    int maxItemCount = 0;
+    bool storeItems = true;
+    int encryptedExpireSeconds = 0;
+};
+
+class Tabs
+{
+public:
+    Tabs();
+    ~Tabs();
+
+    Tabs(const Tabs &other);
+    Tabs &operator=(const Tabs &other);
+
+    TabProperties tabProperties(const QString &name) const;
+    void setTabProperties(const TabProperties &tabProperties);
+
+    void save(QSettings *settings, const QStringList &tabs);
+
+private:
+    struct PrivateData;
+    std::unique_ptr<PrivateData> m_data;
+};

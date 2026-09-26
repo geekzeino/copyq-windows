@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#pragma once
+
+
+class QCoreApplication;
+class QString;
+
+void setSessionName(const QString &sessionName);
+
+void initSession(QCoreApplication *application, const QString &sessionName);
+
+/** Application class. */
+class App
+{
+public:
+    explicit App(
+            QCoreApplication *application,
+            const QString &sessionName
+            );
+
+    virtual ~App();
+
+    static void installTranslator();
+
+    /**
+     * Execute application. Returns immediately if exit() was called before.
+     * @return Exit code.
+     */
+    int exec();
+
+    /**
+     * Exit application with given exit code.
+     */
+    virtual void exit(int exitCode=0);
+
+    /**
+     * Return true if exit() was called.
+     */
+    bool wasClosed() const;
+
+    App(const App &) = delete;
+    App &operator=(const App &) = delete;
+
+private:
+    QCoreApplication *m_app;
+    int m_exitCode;
+    bool m_started;
+};

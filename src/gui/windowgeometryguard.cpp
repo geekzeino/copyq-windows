@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include "windowgeometryguard.h"
+
+#include "common/appconfig.h"
+#include "common/timer.h"
+#include "gui/geometry.h"
+#include "gui/screen.h"
+#include "platform/platformnativeinterface.h"
+#include "platform/platformwindow.h"
+
+#include <QApplication>
+#include <QDebug>
+#include <QEvent>
+#include <QLoggingCategory>
+#include <QMoveEvent>
+#include <QScreen>
+#include <QVariant>
+#include <QWidget>
+#include <QWindow>
+
+namespace {
+
+Q_DECLARE_LOGGING_CATEGORY(geometryGuardCategory)
+Q_LOGGING_CATEGORY(geometryGuardCategory, "copyq.geometryguard")
+
+bool openOnCurrentScreen()
+{
+    return AppConfig().option<Config::open_windows_on_current_screen>();
+}
+
+bool isRestoreGeometryEnabled()
+{
+    return AppConfig().option<Config::restore_geometry>();
+}
+
+bool isMousePositionSupported()
+{
+    // On Wayland, getting mouse position can return
+    // the last known mouse position in an own Qt application window.
+    static const bool supported = !QCursor::pos().isNull();
+    return supported;
+}
+
+QScreen *currentScreen()
+{
+    if (!isMousePositionSupported())
+        return nullptr;
+
+    const int i = screenNumberAt(QCursor::pos());
+    const auto screens = QGuiApplication::screens();
+    if (0 <= i && i < screens.size())
+        return screens[i];
+
+    return nullptr;
+}
+
+} // namespace
+
+void raiseWindow(QWidget *window)
+{
+    window->raise();
+
+    // When the app is already active (e.g. dialog opened from the main
+    // window), the activation calls are redundant and can interfere with
+    // focus/key dispatch on some platforms.
+    if (QApplication::applicationState() != Qt::ApplicationActive) {
+        window->activateWindow();
+        QApplication::setActiveWindow(window);
+    }
+
+    // Synchronous platform raise: the window manager must process the
+    // raise before we return, otherwise macOS (and potentially other
+    // platforms) can suppress or hide the window before the raise takes
+    // effect.  A previous version deferred this via QTimer::singleShot(0),
+    // which caused tray menus and windows triggered by global shortcuts to
+    // require multiple attempts to appear.  (See issue #3445.)
+    const auto wid = window->winId();
+    const auto platformWindow = platformNativeInterface()->getWindow(wid);
+    if (platformWindow)
+        platformWindow->raise();
+}
+
+void WindowGeometryGuard::create(QWidget *window)
+{
+    static const bool enabled = isRestoreGeometryEnabled();
+    if (enabled)
+        new WindowGeometryGuard(window);
+}
+
+bool WindowGeometryGuard::eventFilter(QObject *, QEvent *event)
+{
+    const QEvent::Type type = event->type();
+
+    switch (type) {
+    case QEvent::Show: {
+        m_timerSaveGeometry.stop();
+
+        QWindow *window = m_window->windowHandle();
+        if (window) {
+            connect( window, &QWindow::screenChanged,
+                     this, &WindowGeometryGuard::onScreenChanged, Qt::UniqueConnection );
+
+            if ( !isWindowGeometryLocked() && openOnCurrentScreen() && isMousePositionSupported() ) {
+                QScreen *screen = currentScreen();
+                if (screen && window->screen() != screen) {
+                    qCDebug(geometryGuardCategory) << "Moving to screen:" << screen->name();
+                    m_window->move(screen->availableGeometry().topLeft());
+                }
+            }
+        }
+        break;
+    }
+
+    case QEvent::Move:
+    case QEvent::Resize:
+        if ( !isWindowGeometryLocked() && m_window->isVisible() && !m_window->isMinimized() )
+            m_timerSaveGeometry.start();
+        break;
+
+    case QEvent::Hide:
+        if ( isGeometryGuardBlockedUntilHidden(m_window) ) {
+            setGeometryGuardBlockedUntilHidden(m_window, false);
+            restoreWindowGeometry();
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    return false;
+}
+
+WindowGeometryGuard::WindowGeometryGuard(QWidget *window)
+    : QObject(window)
+    , m_window(window)
+{
+    initSingleShotTimer(&m_timerSaveGeometry, 250, this, &WindowGeometryGuard::saveWindowGeometry);
+    initSingleShotTimer(&m_timerRestoreGeometry, 0, this, &WindowGeometryGuard::restoreWindowGeometry);
+    initSingleShotTimer(&m_timerUnlockGeometry, 250, this, &WindowGeometryGuard::unlockWindowGeometry);
+
+    m_window->installEventFilter(this);
+    restoreWindowGeometry();
+}
+
+bool WindowGeometryGuard::isWindowGeometryLocked() const
+{
+    return m_timerUnlockGeometry.isActive() || isGeometryGuardBlockedUntilHidden(m_window);
+}
+
+bool WindowGeometryGuard::lockWindowGeometry()
+{
+    if ( isWindowGeometryLocked() )
+        return false;
+
+    m_timerUnlockGeometry.start();
+
+    return true;
+}
+
+void WindowGeometryGuard::saveWindowGeometry()
+{
+    if ( !lockWindowGeometry() )
+        return;
+
+    ::saveWindowGeometry(m_window, openOnCurrentScreen());
+    unlockWindowGeometry();
+}
+
+void WindowGeometryGuard::restoreWindowGeometry()
+{
+    if ( !lockWindowGeometry() )
+        return;
+
+    ::restoreWindowGeometry(m_window, openOnCurrentScreen());
+}
+
+void WindowGeometryGuard::unlockWindowGeometry()
+{
+    m_timerUnlockGeometry.stop();
+}
+
+void WindowGeometryGuard::onScreenChanged()
+{
+    if (!openOnCurrentScreen())
+        return;
+
+    if ( !lockWindowGeometry() )
+        return;
+
+    QWindow *window = m_window->windowHandle();
+    if (!window)
+        return;
+
+    QScreen *screen = window->screen();
+    if (!screen)
+        return;
+
+    qCDebug(geometryGuardCategory) << "Screen changed:" << screen->name();
+
+    const bool isMousePositionSupported = ::isMousePositionSupported();
+    if ( window && isMousePositionSupported && screen != currentScreen() ) {
+        qCDebug(geometryGuardCategory) << "Avoiding geometry-restore on incorrect screen";
+        return;
+    }
+
+    if (isMousePositionSupported || m_window->isModal()) {
+        ::restoreWindowGeometry(m_window, true);
+    } else if ( m_window->isVisible() ) {
+        // WORKAROUND: Center window position on Sway window compositor which
+        // does not support changing window position.
+        m_window->hide();
+        ::restoreWindowGeometry(m_window, true);
+        m_window->show();
+    } else {
+        ::restoreWindowGeometry(m_window, true);
+    }
+}

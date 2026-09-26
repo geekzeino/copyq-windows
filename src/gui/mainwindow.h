@@ -1,0 +1,767 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#pragma once
+
+
+#include "common/clipboardmode.h"
+#include "common/command.h"
+#include "common/navigationstyle.h"
+#include "gui/clipboardbrowsershared.h"
+#include "gui/menuitems.h"
+#include "item/persistentdisplayitem.h"
+
+#include "platform/platformnativeinterface.h"
+
+#include <QMainWindow>
+#include <QPersistentModelIndex>
+#include <QPointer>
+#include <QTimer>
+#include <QtContainerFwd>
+
+enum class PasswordSource;
+class Action;
+class ActionDialog;
+class AppConfig;
+class ClipboardBrowser;
+class ClipboardBrowserPlaceholder;
+class CommandAction;
+class CommandDialog;
+class ConfigurationManager;
+class Notification;
+class QAction;
+class QMimeData;
+class SystemTrayIcon;
+class Tabs;
+class Theme;
+class TrayMenu;
+class ToolBar;
+class QModelIndex;
+struct NotificationButton;
+
+Q_DECLARE_METATYPE(QPersistentModelIndex)
+
+#if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
+using NativeEventResult = qintptr;
+#else
+Q_DECLARE_METATYPE(QList<QPersistentModelIndex>)
+using NativeEventResult = long;
+#endif
+
+namespace Ui
+{
+    class MainWindow;
+}
+
+namespace Encryption {
+    class EncryptionKey;
+}
+
+enum ItemActivationCommand {
+    ActivateNoCommand = 0x0,
+    ActivateCloses = 0x1,
+    ActivateFocuses = 0x2,
+    ActivatePastes = 0x4
+};
+
+enum class ImportOptions {
+    /// Select what to import/export in dialog.
+    Select,
+    /// Import/export everything without asking.
+    All
+};
+
+struct ImportSelection {
+    QStringList tabs;
+    QVariantMap configuration;
+    QVariantList commands;
+};
+
+struct MainWindowOptions {
+    bool activateCloses() const { return itemActivationCommands & ActivateCloses; }
+    bool activateFocuses() const { return itemActivationCommands & ActivateFocuses; }
+    bool activatePastes() const { return itemActivationCommands & ActivatePastes; }
+
+    bool confirmExit = true;
+    NavigationStyle navigationStyle = NavigationStyle::Default;
+    bool trayCommands = false;
+    bool trayCurrentTab = false;
+    QString trayTabName;
+    int trayItems = 5;
+    bool nativeTrayMenu = false;
+    bool trayImages = true;
+    bool trayMenuOpenOnLeftClick = false;
+    int transparency = 0;
+    int transparencyFocused = 0;
+
+    bool hideTabs = false;
+
+    bool hideMainWindow = false;
+    bool closeOnUnfocus = false;
+
+    int itemActivationCommands = ActivateCloses;
+
+    bool clearFirstTab = false;
+
+    bool trayItemPaste = true;
+
+    QString clipboardTab;
+};
+
+/**
+ * Application's main window.
+ *
+ * Contains search bar and tab widget.
+ * Each tab contains one clipboard browser widget.
+ *
+ * It operates in two modes:
+ *  * browse mode with search bar hidden and empty (default) and
+ *  * search mode with search bar shown and not empty.
+ *
+ * If user starts typing text the search mode will become active and
+ * the search bar focused.
+ * If the text is deleted or escape pressed the browse mode will become active.
+ */
+class MainWindow final : public QMainWindow
+{
+    Q_OBJECT
+    Q_PROPERTY(QStringList copyqStats READ copyqStats CONSTANT)
+
+public:
+    explicit MainWindow(
+        const ClipboardBrowserSharedPtr &sharedData, QWidget *parent = nullptr);
+
+    ~MainWindow();
+
+    /** Return true if in browse mode (i.e. search field is hidden). */
+    bool browseMode() const;
+
+    /**
+     * Try to close command dialog and return true on success.
+     *
+     * Note that dialog won't be closed if it has unsaved changes
+     * and user cancels the closing.
+     */
+    bool maybeCloseCommandDialog();
+
+    /**
+     * Return browser widget in given tab @a index.
+     * Load items if not loaded yet.
+     */
+    ClipboardBrowser *browser(int index);
+
+    /**
+     * Return browser widget in current tab.
+     * Load items if not loaded yet.
+     */
+    ClipboardBrowser *browser();
+
+    /**
+     * Return browser widget in current tab or nullptr if not loaded.
+     */
+    ClipboardBrowser *browserOrNull();
+
+    /** Return browser containing item or nullptr. */
+    ClipboardBrowser *browserForItem(const QModelIndex &index);
+
+    /**
+     * Find tab with given @a name.
+     * @return found tab index or -1
+     */
+    int findTabIndex(const QString &name);
+
+    /**
+     * Tries to find tab with exact or similar name (ignores
+     * key hints '&') or creates new one.
+     * @return Existing or new tab with given @a name.
+     */
+    ClipboardBrowser *tab(
+            const QString &name //!< Name of the new tab.
+            );
+
+    /**
+     * Show/hide tray menu. Return true only if menu is shown.
+     */
+    bool toggleMenu();
+    bool toggleMenu(const QString &tabName, int itemCount, QPoint position);
+
+    /** Switch between browse and search mode. */
+    void enterBrowseMode();
+
+    void enterSearchMode();
+
+    void enterSearchMode(const QString &txt);
+
+    /** Show and focus main window. */
+    void showWindow();
+    /** Hide window to tray or minimize if tray is not available. */
+    void hideWindow();
+    /** Minimize window (hide if option is set). */
+    void minimizeWindow();
+    /** Set current tab. */
+    bool setCurrentTab(int index);
+
+    bool focusPrevious();
+
+    /** Open tab group renaming dialog. */
+    void openRenameTabGroupDialog(const QString &name);
+    /** Remove all tab in group. */
+    void removeTabGroup(const QString &name);
+    /** Remove tab. */
+    void removeTab(
+            bool ask, //!< Ask before removing.
+            int tabIndex //!< Tab index or current tab.
+            );
+    /** Set icon for tab or tab group. */
+    void setTabIcon(const QString &tabName);
+
+    void setTabIcon(const QString &tabName, const QString &icon);
+
+    bool unloadTab(const QString &tabName);
+    void forceUnloadTab(const QString &tabName);
+
+    /**
+     * Save all items in tab to file.
+     * @return True only if all items were successfully saved.
+     */
+    bool saveTab(
+            const QString &fileName,
+            int tabIndex = -1 //!< Tab index or current tab.
+            );
+
+    /** Save all unsaved tabs. */
+    Q_SLOT void saveTabs();
+
+    /**
+     * Load saved items to new tab.
+     * @return True only if all items were successfully loaded.
+     */
+    bool loadTab(const QString &fileName);
+
+    /**
+     * Import tabs, settings etc.
+     * @return True only if all data were successfully loaded.
+     */
+    bool importDataFrom(const QString &fileName, ImportOptions options);
+
+    /**
+     * Export tabs, settings etc.
+     * @return True only if all data were successfully saved.
+     */
+    bool exportAllData(const QString &fileName);
+
+    /** Temporarily disable monitoring (i.e. adding new clipboard content to the first tab). */
+    void disableClipboardStoring(bool disable);
+
+    /** Return true only if monitoring is enabled. */
+    bool isMonitoringEnabled() const;
+
+    QStringList tabs() const;
+
+    /// Used by config() command.
+    QVariant config(const QVariantList &nameValue);
+    QString configDescription();
+
+    QVariantMap actionData(int id) const;
+    void setActionData(int id, const QVariantMap &data);
+
+    void setCommands(const QVector<Command> &commands);
+
+    void setSessionIconColor(QColor color);
+
+    void setSessionIconTag(const QString &tag);
+
+    void setSessionIconTagColor(QColor color);
+
+    QColor sessionIconColor() const;
+
+    QString sessionIconTag() const;
+
+    QColor sessionIconTagColor() const;
+
+    void setTrayTooltip(const QString &tooltip);
+
+    bool setMenuItemEnabled(int actionId, int currentRun, int menuItemMatchCommandIndex, const QVariantMap &menuItem);
+
+    QVariantMap setDisplayData(int actionId, const QVariantMap &data);
+
+    QVector<Command> automaticCommands() const { return m_automaticCommands; }
+    QVector<Command> displayCommands() const { return m_displayCommands; }
+    QVector<Command> scriptCommands() const { return m_scriptCommands; }
+    QStringList copyqStats() const;
+
+    /** Close main window and exit the application. */
+    void exit();
+
+    /** Load settings. */
+    void loadSettings(QSettings &settings, AppConfig *appConfig);
+
+    void loadTheme(const QSettings &themeSettings);
+
+    /** Open help. */
+    void openHelp();
+
+    /** Open log dialog. */
+    void openLogDialog();
+
+    /** Open about dialog. */
+    void openAboutDialog();
+
+    /** Open dialog with clipboard content. */
+    void showClipboardContent();
+
+    /** Open dialog with active commands. */
+    void showProcessManagerDialog();
+
+    /** Open action dialog with given input data. */
+    ActionDialog *openActionDialog(const QVariantMap &data);
+
+    /** Open action dialog with input data from selected items. */
+    void openActionDialog();
+
+    void showItemContent();
+
+    /** Open preferences dialog. */
+    void openPreferences();
+
+    /** Open commands dialog. */
+    void openCommands();
+
+    /** Sort selected items. */
+    void sortSelectedItems();
+    /** Reverse order of selected items. */
+    void reverseSelectedItems();
+
+    /**
+     * Import tabs, settings etc. (select file in dialog).
+     * @return True only if all data were successfully loaded.
+     */
+    bool importData();
+
+    /** Create new item in current tab. */
+    void editNewItem();
+    /** Paste items to current tab. */
+    void pasteItems();
+    /** Copy selected items in current tab. */
+    void copyItems();
+
+    /** Activate current item. */
+    void activateCurrentItem();
+
+    /** Show window and given tab and give focus to the tab. */
+    void showBrowser(const ClipboardBrowser *browser);
+
+    /** Show error popup message. */
+    void showError(const QString &msg);
+
+    Notification *createNotification(const QString &id = QString());
+
+    /** Open command dialog and add commands. */
+    void addCommands(const QVector<Command> &commands);
+
+    /** Execute command on given input data. */
+    Action *action(
+            const QVariantMap &data,
+            const Command &cmd,
+            const QModelIndex &outputIndex);
+
+    bool triggerMenuCommand(const Command &command, const QString &triggeredShortcut);
+
+    void runInternalAction(Action *action);
+    bool isInternalActionId(int id) const;
+
+    void setClipboard(const QVariantMap &data);
+    void setClipboard(const QVariantMap &data, ClipboardMode mode);
+    void setClipboardAndSelection(const QVariantMap &data);
+    bool registerClipboardProviderAction(int actionId, ClipboardMode mode);
+    void moveToClipboard(ClipboardBrowser *c, int row);
+
+    const QMimeData *getClipboardData(ClipboardMode mode);
+
+    /** Show/hide main window. Return true only if window is shown. */
+    bool toggleVisible();
+
+    /**
+     * Like toggleVisible() but hide window if visible and not focused, which
+     * seems more reasonable when using mouse.
+     */
+    void toggleVisibleFromTray();
+
+    /** Set icon for current tab or tab group. */
+    void setTabIcon();
+
+    /** Open tab creation dialog. */
+    void openNewTabDialog(const QString &name);
+    void openNewTabDialog();
+
+    /** Remove tab. */
+    void removeTab();
+
+    /** Rename current tab to given name (if possible). */
+    void renameTabGroup(const QString &newName, const QString &oldName);
+    /** Open tab renaming dialog (for given tab index or current tab). */
+    void openRenameTabDialog(int tabIndex);
+    void openRenameTabDialog();
+    /** Rename current tab to given name (if possible). */
+    void renameTab(const QString &name, int tabIndex);
+
+    void addAndFocusTab(const QString &name);
+
+    /** Toggle monitoring (i.e. adding new clipboard content to the first tab). */
+    void toggleClipboardStoring();
+
+    /**
+     * Export tabs, settings etc. (select in file dialog).
+     * @return True only if all data were successfully saved.
+     */
+    bool exportData();
+
+    /** Set next or first tab as current. */
+    void nextTab();
+    /** Set previous or last tab as current. */
+    void previousTab();
+
+    void setClipboardData(const QVariantMap &data);
+
+    /** Set text for filtering items. */
+    void setFilter(const QString &text);
+    QString filter() const;
+
+    void updateShortcuts();
+
+    void setItemPreviewVisible(bool visible);
+    bool isItemPreviewVisible() const;
+
+    void setScriptOverrides(const QVector<int> &overrides, int actionId);
+    bool isScriptOverridden(int id) const;
+
+    QVariant callPlugin(const QVariantList &arguments);
+
+signals:
+    /** Request clipboard change. */
+    void changeClipboard(const QVariantMap &data, ClipboardMode mode);
+
+    void tabGroupSelected(bool selected);
+
+    void requestExit();
+
+    void commandsSaved(const QVector<Command> &commands);
+
+    void configurationChanged(AppConfig *appConfig);
+
+    void disableClipboardStoringRequest(bool disable);
+
+    void sendActionData(int actionId, const QByteArray &bytes);
+
+    void stopAction(int actionId);
+
+    void clipboardTabChanged();
+
+protected:
+    bool eventFilter(QObject *object, QEvent *ev) override;
+    void keyPressEvent(QKeyEvent *event) override;
+    void keyReleaseEvent(QKeyEvent *event) override;
+    bool event(QEvent *event) override;
+
+    /** Hide (minimize to tray) window on close. */
+    void closeEvent(QCloseEvent *event) override;
+
+    bool focusNextPrevChild(bool next) override;
+
+    bool nativeEvent(
+        const QByteArray &eventType, void *message, NativeEventResult *result) override;
+
+private:
+    ClipboardBrowserPlaceholder *getPlaceholderForMenu();
+    ClipboardBrowserPlaceholder *getPlaceholderForTrayMenu();
+    void filterMenuItems(const QString &searchText);
+    void filterTrayMenuItems(const QString &searchText);
+    void trayActivated(int reason);
+    void onMenuActionTriggered(const QVariantMap &data, bool omitPaste);
+    void onTrayActionTriggered(const QVariantMap &data, bool omitPaste);
+    void findNextOrPrevious();
+    void tabChanged(int current, int previous);
+    void saveTabPositions();
+    void onSaveTabPositionsTimer();
+    void doSaveTabPositions(AppConfig *appConfig);
+    void tabsMoved(const QString &oldPrefix, const QString &newPrefix);
+    void tabBarMenuRequested(QPoint pos, int tab);
+    void tabTreeMenuRequested(QPoint pos, const QString &groupPath);
+    void tabCloseRequested(int tab);
+    void onFilterChanged();
+
+    void raiseLastWindowAfterMenuClosed();
+
+    /** Update WId for paste and last focused window if needed. */
+    void updateFocusWindows();
+
+    /** Update tray and window icon depending on current state. */
+    void updateIcon();
+
+    void updateContextMenuTimeout();
+
+    void updateTrayMenuItemsTimeout();
+    void initTrayMenuItems();
+
+    void updateItemPreviewAfterMs(int ms);
+
+    void updateItemPreviewTimeout();
+
+    void toggleItemPreviewVisible();
+
+    void onAboutToQuit();
+
+    void onItemCommandActionTriggered(CommandAction *commandAction, const QString &triggeredShortcut);
+    void onClipboardCommandActionTriggered(CommandAction *commandAction, const QString &triggeredShortcut);
+
+    void onTabWidgetDropItems(const QString &tabName, const QMimeData *data, bool *accepted);
+
+    void showContextMenuAt(QPoint position);
+
+    void showContextMenu();
+
+    void moveUp();
+    void moveDown();
+    void moveToTop();
+    void moveToBottom();
+
+    void onBrowserCreated(ClipboardBrowser *browser);
+    void onBrowserLoaded(ClipboardBrowser *browser);
+    void onBrowserDestroyed(ClipboardBrowserPlaceholder *placeholder);
+
+    void onItemSelectionChanged(const ClipboardBrowser *browser);
+    void onItemsChanged(const ClipboardBrowser *browser);
+    void onInternalEditorStateChanged(const ClipboardBrowser *self);
+
+    void onItemWidgetCreated(const PersistentDisplayItem &item);
+
+    void onActionDialogAccepted(const Command &command, const QStringList &arguments, const QVariantMap &data);
+
+    void onSearchShowRequest(const QString &text);
+
+    void updateEnabledCommands();
+
+    void updateCommands(QVector<Command> allCommands, bool forceSave);
+    bool syncInternalCommands(QVector<Command> *allCommands);
+
+    void disableHideWindowOnUnfocus();
+    void enableHideWindowOnUnfocus();
+    void hideWindowIfNotActive();
+    void hideWindowOnUnfocus(int intervalMsec);
+
+    template <typename SlotReturnType>
+    using MainWindowActionSlot = SlotReturnType (MainWindow::*)();
+
+    enum TabNameMatching {
+        MatchExactTabName,
+        MatchSimilarTabName
+    };
+
+    struct MenuMatchCommands {
+        int currentRun = 0;
+        int actionId = -1;
+        QStringList matchCommands;
+        QVector< QPointer<QAction> > actions;
+        QMenu *menu = nullptr;
+    };
+
+    void runDisplayCommands();
+
+    void clearHiddenDisplayData();
+
+    void reloadBrowsers();
+
+    ClipboardBrowserPlaceholder *createTab(const QString &name, TabNameMatching nameMatch, const Tabs &tabs);
+
+    int findTabIndexExactMatch(const QString &name);
+
+    /** Create menu bar and tray menu with items. Called once. */
+    void createMenu();
+
+    /** Create context menu for @a tab. It will be automatically deleted after closed. */
+    void popupTabBarMenu(QPoint pos, const QString &tab);
+
+    void updateContextMenu(int intervalMsec);
+
+    void updateTrayMenuItems();
+    void updateTrayMenuCommands();
+
+    void updateWindowTransparency(bool mouseOver = false);
+
+    /** Return browser widget in given tab @a index. */
+    ClipboardBrowserPlaceholder *getPlaceholder(int index) const;
+
+    ClipboardBrowserPlaceholder *getPlaceholder(const QString &tabName) const;
+
+    /** Return browser widget in current tab. */
+    ClipboardBrowserPlaceholder *getPlaceholder() const;
+
+    /** Call updateFocusWindows() after a small delay if main window or menu is not active. */
+    void delayedUpdateForeignFocusWindows();
+
+    /** Show/hide tab bar. **/
+    void setHideTabs(bool hide);
+
+    /**
+     * Return true if window should be minimized instead of closed/hidden.
+     *
+     * If tray icon is not available, window should be minimized so that it can be opened with
+     * mouse.
+     */
+    bool closeMinimizes() const;
+
+    template <typename SlotReturnType>
+    QAction *createAction(Actions::Id id, MainWindowActionSlot<SlotReturnType> slot, QMenu *menu, QWidget *parent = nullptr);
+
+    QAction *addTrayAction(Actions::Id id);
+
+    template <typename Receiver, typename ReturnType>
+    QAction *addItemAction(Actions::Id id, Receiver *receiver, ReturnType (Receiver::* slot)());
+
+    QVector<Command> commandsForMenu(const QVariantMap &data, const QString &tabName, const QVector<Command> &allCommands);
+    void addCommandsToItemMenu(ClipboardBrowser *c);
+    void addCommandsToTrayMenu(const QVariantMap &clipboardData, QList<QAction*> *actions);
+    void addMenuMatchCommand(MenuMatchCommands *menuMatchCommands, const QString &matchCommand, QAction *act);
+    void runMenuCommandFilters(MenuMatchCommands *menuMatchCommands, QVariantMap &data);
+    void interruptMenuCommandFilters(MenuMatchCommands *menuMatchCommands);
+    void stopMenuCommandFilters(MenuMatchCommands *menuMatchCommands);
+
+    bool abortAction(int &actionId, int waitMs = 0, int terminateAfterMs = 5000, int killAfterMs = 5000);
+
+    bool isItemMenuDefaultActionValid() const;
+
+    void updateToolBar();
+
+    void setTrayEnabled(bool enable = true);
+
+    void runDisplayCommand(const Command &command);
+
+    bool isWindowVisible() const;
+
+    void onEscape();
+
+    void updateActionShortcuts();
+
+    QAction *actionForMenuItem(Actions::Id id, QWidget *parent, Qt::ShortcutContext context);
+
+    void addMenuItems(TrayMenu *menu, ClipboardBrowserPlaceholder *placeholder, int maxItemCount, const QString &searchText);
+    void activateMenuItem(ClipboardBrowserPlaceholder *placeholder, const QVariantMap &data, bool omitPaste);
+    bool toggleMenu(TrayMenu *menu, QPoint pos);
+    bool toggleMenu(TrayMenu *menu);
+
+    bool exportDataFrom(const QString &fileName, const QStringList &tabs, bool exportConfiguration, bool exportCommands, const Encryption::EncryptionKey &encryptionKey);
+    bool exportDataV4(QDataStream *out, const QStringList &tabs, bool exportConfiguration, bool exportCommands);
+    bool exportDataV5(QDataStream *out, const QStringList &tabs, bool exportConfiguration, bool exportCommands, const Encryption::EncryptionKey &encryptionKey);
+    QVariantMap exportTabData(const QString &tab, bool *ok);
+
+    bool canImport(const ImportSelection &importSelection);
+    void importSelected(const ImportSelection &importSelection);
+    bool importDataV2(QDataStream *in);
+    bool importDataV3(QDataStream *in, ImportOptions options);
+    bool importDataV4(QDataStream *in, ImportOptions options);
+    bool importDataV5(QDataStream *in, ImportOptions options);
+    bool importTabData(
+        const QString &requestedTabName,
+        const QVariantMap &tabMap,
+        const Tabs &tabProps,
+        const Encryption::EncryptionKey &key);
+
+    const Theme &theme() const;
+
+    Action *runScript(const QString &script, const QVariantMap &data = QVariantMap());
+    bool runEventHandlerScript(const QString &script, const QVariantMap &data);
+    void runItemHandlerScript(
+        const QString &script, const ClipboardBrowser *browser, int firstRow, int lastRow);
+
+    void activateCurrentItemHelper();
+    void onItemClicked();
+    void onItemDoubleClicked();
+
+    void promptForEncryptionPasswordIfNeeded(AppConfig *appConfig);
+    void reencryptTabsIfNeeded(AppConfig *appConfig);
+    void reencryptTabsIfNeededHelper(AppConfig *appConfig);
+
+    /**
+     * Update tab name in placeholder and configuration.
+     * Return true on success, false if setting tab name in placeholder failed
+     * (most likely failure to move the tab data).
+     */
+    bool updateTabName(
+        ClipboardBrowserPlaceholder *placeholder,
+        const QString &newName,
+        AppConfig *appConfig,
+        Tabs *tabs);
+
+    ConfigurationManager *cm;
+    Ui::MainWindow *ui;
+
+    QMenu *m_menuItem;
+    TrayMenu *m_trayMenu;
+
+    SystemTrayIcon *m_tray;
+
+    ToolBar *m_toolBar;
+
+    MainWindowOptions m_options;
+
+    bool m_clipboardStoringDisabled = false;
+
+    ClipboardBrowserSharedPtr m_sharedData;
+    bool m_wasEncrypted = false;
+    bool m_reencrypting = false;
+
+    QVector<Command> m_automaticCommands;
+    QVector<Command> m_displayCommands;
+    QVector<Command> m_menuCommands;
+    QVector<Command> m_trayMenuCommands;
+    QVector<Command> m_scriptCommands;
+
+    PlatformWindowPtr m_windowForMenuPaste;
+    PlatformWindowPtr m_windowForMainPaste;
+
+    QTimer m_timerUpdateFocusWindows;
+    QTimer m_timerUpdateContextMenu;
+    QTimer m_timerUpdatePreview;
+    QTimer m_timerSaveTabPositions;
+    QTimer m_timerHideWindowIfNotActive;
+    QTimer m_timerRaiseLastWindowAfterMenuClosed;
+
+    bool m_trayMenuDirty = true;
+
+    QVariantMap m_clipboardData;
+
+    TrayMenu *m_menu;
+    QString m_menuTabName;
+    int m_menuMaxItemCount;
+
+    QPointer<CommandDialog> m_commandDialog;
+
+    bool m_wasMaximized = false;
+
+    bool m_showItemPreview = false;
+
+    bool m_activatingItem = false;
+
+    QVector< QPointer<QAction> > m_actions;
+
+    QList<PersistentDisplayItem> m_displayItemList;
+    PersistentDisplayItem m_currentDisplayItem;
+    int m_displayActionId = -1;
+
+    MenuMatchCommands m_trayMenuMatchCommands;
+    MenuMatchCommands m_itemMenuMatchCommands;
+
+    PlatformClipboardPtr m_clipboard;
+
+    bool m_isActiveWindow = false;
+    bool m_singleClickActivate = 0;
+    bool m_enteringSearchMode = false;
+
+    QVector<int> m_overrides;
+    int m_maxEventHandlerScripts = 10;
+    QPointer<Action> m_actionCollectOverrides;
+
+    int m_provideClipboardActionId = -1;
+    int m_provideSelectionActionId = -1;
+
+    bool m_usedKeyStore = false;
+};

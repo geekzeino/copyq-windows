@@ -1,0 +1,64 @@
+# Generated CMake files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# Generated Visual Studio files
+/plugins/Debug/
+/plugins/Release/
+/plugins/Win*/
+/Debug/
+/Release/
+/Win*/
+*.sln
+*.suo
+*.*sdf
+*.vc?proj*
+
+# Generated Makefiles
+/plugins/Makefile
+/plugins/*/Makefile
+/src/Makefile
+/Makefile
+
+# Generated Qt files
+/plugins/**/*.dir/
+/src/copyqcon.dir/
+/src/copyq.dir/
+/src/copyq_*.qm
+/src/copyq_*.qm.rule
+/src/qrc_copyq.cxx
+/src/translations.qrc
+/src/qrc_translations.cxx
+
+moc_*
+ui_*
+*.depends
+*.o
+*.dylib
+*.moc
+**/qrc_*.cpp
+/.qmake.cache
+/copyq.app
+copyq.pro.user*
+CMakeLists.txt.user*
+.DS_Store
+.qmake.stash
+*.pyc
+*.dmg
+/build*
+*.qm
+
+# Generated Sphinx files
+/docs/_build
+
+# Generated Flatpak files
+/shared/flatpak/.flatpak-builder
+/shared/flatpak/copyq
+
+# Visual Studio Code
+/.vscode
+
+# Files for utils/launchpad/build.sh
+.gitconfig
+launchpad.key

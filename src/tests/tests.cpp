@@ -1,0 +1,800 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include "tests.h"
+#include "test_utils.h"
+#include "tests_common.h"
+
+#include "itemencryptedtests.h"
+#include "itemfakevimtests.h"
+#include "itemimagetests.h"
+#include "itempinnedtests.h"
+#include "itemsynctests.h"
+#include "itemtagstests.h"
+
+#include "app/app.h"
+#include "common/client_server.h"
+#include "common/config.h"
+#include "common/log.h"
+#include "common/process.h"
+#include "common/settings.h"
+#include "common/shortcuts.h"
+#include "common/sleeptimer.h"
+#include "common/textdata.h"
+#include "platform/platformclipboard.h"
+#include "platform/platformnativeinterface.h"
+
+#include <QDir>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
+#include <QGuiApplication>
+#include <QLoggingCategory>
+#include <QMap>
+#include <QProcess>
+#include <QRegularExpression>
+#include <QStandardPaths>
+#include <QTest>
+#include <QTimer>
+
+#include <memory>
+
+namespace {
+
+Q_DECLARE_LOGGING_CATEGORY(testCategory)
+Q_LOGGING_CATEGORY(testCategory, "copyq.tests")
+
+const QString defaultTestId = QStringLiteral("CORE");
+const QString defaultTestPlugins = QStringLiteral("*itemtext*,*itemnotes*");
+
+class PerformanceTimer final {
+public:
+    PerformanceTimer() {
+        m_timer.start();
+    }
+
+    void printPerformance(const char *label, const QStringList &arguments = QStringList()) {
+        const auto elapsedMs = m_timer.elapsed();
+        if (elapsedMs > 500)
+            qCWarning(testCategory) << "--- PERFORMANCE ---" << elapsedMs << "ms:" << label << arguments;
+        m_timer.start();
+    }
+
+private:
+    QElapsedTimer m_timer;
+};
+
+QByteArray decorateOutput(const QByteArray &label, const QByteArray &stderrOutput)
+{
+    QByteArray output = "\n" + stderrOutput;
+    output.replace('\n', "\n    ");
+    output.prepend("\n  " + label + ":");
+    return output;
+}
+
+QStringList pluginPaths()
+{
+    QDir dir(QCoreApplication::applicationDirPath() + "/src");
+    const QString pattern = QStringLiteral("*itemtests.*");
+    QStringList files;
+    for (const auto &fileName : dir.entryList({pattern}))
+        files.append( dir.absoluteFilePath(fileName) );
+    if (files.isEmpty()) {
+        qCCritical(testCategory) << "Failed to find the test plugin"
+            << pattern << "in" << dir.absolutePath();
+    }
+    return files;
+}
+
+class TestInterfaceImpl final : public TestInterface {
+public:
+    TestInterfaceImpl()
+        : m_server(nullptr)
+        , m_env(QProcessEnvironment::systemEnvironment())
+    {
+        if ( qEnvironmentVariableIsEmpty("COPYQ_PLUGINS") )
+            m_env.insert("COPYQ_PLUGINS", pluginPaths().join(';'));
+        m_env.insert("COPYQ_LOG_LEVEL", "DEBUG");
+        m_env.insert("COPYQ_SESSION_COLOR", defaultSessionColor);
+        m_env.insert("COPYQ_CLIPBOARD_COPY_TIMEOUT_MS", "2000");
+        m_env.insert("COPYQ_PASSWORD", "TEST123");
+        m_env.insert("COPYQ_QT_FILE_DIALOGS", "1");
+        const auto loggingRules = qgetenv("COPYQ_TESTS_LOGGING_RULES");
+        if ( !loggingRules.isEmpty() ) {
+            m_env.insert("QT_LOGGING_RULES", loggingRules);
+        }
+    }
+
+    ~TestInterfaceImpl()
+    {
+        stopServer();
+    }
+
+    QByteArray startServer() override
+    {
+        m_server.reset(new QProcess);
+        if ( !startTestProcess(m_server.get(), QStringList(), QIODevice::NotOpen) ) {
+            return QString::fromLatin1("Failed to launch \"%1\": %2")
+                .arg(executable())
+                .arg(m_server->errorString())
+                .toUtf8();
+        }
+
+        m_server->closeReadChannel(QProcess::StandardOutput);
+
+        RETURN_ON_ERROR( readServerErrors(), "Failed to start server" );
+
+        return waitForServerToStart();
+    }
+
+    QByteArray stopServer() override
+    {
+        if ( !isServerRunning() )
+            return "Server is not running";
+
+        QByteArray errors;
+        const int exitCode = run(Args("exit"), nullptr, &errors);
+        if ( !testStderr(errors) || exitCode != 0 ) {
+            return "Command 'exit' failed."
+                    + printClienAndServerStderr(errors, exitCode);
+        }
+
+        return waitForServerToStop();
+    }
+
+    QByteArray waitForServerToStop() override
+    {
+        PerformanceTimer perf;
+
+        // Process events in case we own clipboard and the new process requests the contents.
+        SleepTimer t(30000);
+        while ( m_server->state() != QProcess::NotRunning && !m_server->waitForFinished(50) && t.sleep() ) {}
+
+        perf.printPerformance("stopServer");
+
+        if ( m_server->state() != QProcess::NotRunning ) {
+            qCWarning(testCategory) << "terminating server process";
+            m_server->terminate();
+
+            if ( !m_server->waitForFinished() ) {
+                qCWarning(testCategory) << "killing server process";
+                terminateProcess(m_server.get());
+            }
+
+            return "Failed to close server properly!" + readServerErrors(ReadAllStderr);
+        }
+
+        return readServerErrors();
+    }
+
+    bool isServerRunning() override
+    {
+        return m_server != nullptr && m_server->state() == QProcess::Running;
+    }
+
+    QString executable() override
+    {
+        const QByteArray executable = qgetenv("COPYQ_TESTS_EXECUTABLE");
+        if ( !executable.isEmpty() )
+            return QString::fromUtf8(executable);
+
+        QDir dir(QCoreApplication::applicationDirPath());
+        return dir.absoluteFilePath("copyq");
+    }
+
+    int run(const QStringList &arguments, QByteArray *stdoutData = nullptr,
+            QByteArray *stderrData = nullptr, const QByteArray &in = QByteArray(),
+            const QStringList &environment = QStringList()) override
+    {
+        if (stdoutData != nullptr)
+            stdoutData->clear();
+
+        if (stderrData != nullptr)
+            stderrData->clear();
+
+        QProcess p;
+        if (!startTestProcess(&p, arguments, QIODevice::ReadWrite, environment))
+            return -1;
+
+        if ( p.write(in) != in.size() )
+            return -2;
+
+        p.closeWriteChannel();
+
+        if (stdoutData == nullptr)
+            p.closeReadChannel(QProcess::StandardOutput);
+
+        if (stderrData == nullptr)
+            p.closeReadChannel(QProcess::StandardError);
+
+        PerformanceTimer perf;
+
+        SleepTimer t(waitClientRun);
+        while ( p.state() == QProcess::Running ) {
+            if ( stdoutData != nullptr ) {
+                const auto out = p.readAllStandardOutput();
+                stdoutData->append(out);
+            }
+
+            if (stderrData != nullptr) {
+                const auto err = p.readAllStandardError();
+                stderrData->append(err);
+            }
+
+            if ( !t.sleep() ) {
+                qCWarning(testCategory) << "Client process timed out" << arguments;
+                return -1;
+            }
+        }
+
+        if (stderrData != nullptr) {
+            stderrData->append(p.readAllStandardError());
+            stderrData->replace('\r', "");
+        }
+
+        if (stdoutData != nullptr) {
+            stdoutData->append(p.readAllStandardOutput());
+            stdoutData->replace('\r', "");
+        }
+
+        perf.printPerformance("run", arguments);
+
+        return p.exitCode();
+    }
+
+    QByteArray printClienAndServerStderr(const QByteArray &clientStderr, int exitCode)
+    {
+        return "\n  Client exit code: " + QByteArray::number(exitCode) + "\n"
+                + decorateOutput("Client STDERR", clientStderr)
+                + readServerErrors(ReadAllStderr);
+    }
+
+    QByteArray runClient(const QStringList &arguments, const QByteArray &stdoutExpected,
+                         const QByteArray &input = QByteArray()) override
+    {
+        if (!isServerRunning() )
+            return "Server is not running!" + readServerErrors(ReadAllStderr);
+
+        QByteArray stdoutActual;
+        QByteArray stderrActual;
+        const int exitCode = run(arguments, &stdoutActual, &stderrActual, input);
+
+        if ( !testStderr(stderrActual) || exitCode != 0 )
+            return printClienAndServerStderr(stderrActual, exitCode);
+
+        if (stdoutActual != stdoutExpected) {
+            return "Test failed:"
+                    + decorateOutput("Unexpected output", stdoutActual)
+                    + decorateOutput("Expected output", stdoutExpected)
+                    + printClienAndServerStderr(stderrActual, exitCode);
+        }
+
+        return readServerErrors();
+    }
+
+    QByteArray runClientWithError(const QStringList &arguments, int expectedExitCode,
+                                  const QByteArray &stderrContains = QByteArray()) override
+    {
+        Q_ASSERT(expectedExitCode != 0);
+
+        if ( !isServerRunning() )
+            return "Server is not running!" + readServerErrors(ReadAllStderr);
+
+        QByteArray stdoutActual;
+        QByteArray stderrActual;
+        const int exitCode = run(arguments, &stdoutActual, &stderrActual);
+
+        if ( !testStderr(stderrActual) )
+            return printClienAndServerStderr(stderrActual, exitCode);
+
+        if ( !stdoutActual.isEmpty() ) {
+            return "Test failed: Expected empty output."
+                    + decorateOutput("Unexpected output", stdoutActual)
+                    + printClienAndServerStderr(stderrActual, exitCode);
+        }
+
+        if (exitCode != expectedExitCode) {
+            return QString::fromLatin1("Test failed: Unexpected exit code %1; expected was %2")
+                    .arg(exitCode)
+                    .arg(expectedExitCode)
+                    .toUtf8()
+                    + printClienAndServerStderr(stderrActual, exitCode);
+        }
+
+        if ( !stderrActual.contains(stderrContains) ) {
+            return QString::fromLatin1("Test failed: Expected error output on client side with \"%1\".")
+                    .arg(QString::fromUtf8(stderrContains)).toUtf8()
+                    + printClienAndServerStderr(stderrActual, exitCode);
+        }
+
+        return readServerErrors();
+    }
+
+    QByteArray getClipboard(const QString &mime = QString("text/plain"), ClipboardMode mode = ClipboardMode::Clipboard)
+    {
+        const QString command =
+            mode == ClipboardMode::Clipboard
+            ? QStringLiteral("clipboard")
+            : QStringLiteral("selection");
+        QByteArray stdoutActual;
+        QByteArray stderrActual;
+        const int exitCode = run(Args() << command << mime, &stdoutActual, &stderrActual);
+        if ( !testStderr(stderrActual) || exitCode != 0 )
+            return "Failed to get clipboard: " + printClienAndServerStderr(stderrActual, exitCode);
+        return stdoutActual;
+    }
+
+    QByteArray setClipboard(const QVariantMap &data, ClipboardMode mode) override
+    {
+        if ( !data.isEmpty() ) {
+            // Wait for clipboard monitor
+            QByteArray error;
+            SleepTimer t(8000);
+            do {
+                error = runClient(
+                    Args("monitoring() == isClipboardMonitorRunning()"),
+                    QByteArrayLiteral("true\n"));
+            } while (!error.isEmpty() && t.sleep());
+
+            if (!error.isEmpty())
+                return "Clipboard monitor is not running:" + error;
+        }
+
+        clipboard()->setData(mode, data);
+        return {};
+    }
+
+    QByteArray setClipboard(const QByteArray &bytes, const QString &mime, ClipboardMode mode) override
+    {
+        if ( const QByteArray error = setClipboard(createDataMap(mime, bytes), mode);
+                !error.isEmpty() )
+        {
+            return error;
+        }
+
+        return verifyClipboard(bytes, mime);
+    }
+
+    QByteArray verifyClipboard(const QByteArray &data, const QString &mime, bool exact = true) override
+    {
+        // Due to image conversions in clipboard check only if PNG header is present.
+        if ( exact && mime.startsWith(QStringLiteral("image/")) )
+            return verifyClipboard("PNG", QStringLiteral("image/png"), false);
+
+        PerformanceTimer perf;
+
+        SleepTimer t(5000);
+        QByteArray actualBytes;
+        do {
+            actualBytes = getClipboard(mime);
+            if ( exact ? actualBytes == data : actualBytes.contains(data) ) {
+                perf.printPerformance("verifyClipboard", QStringList() << QString::fromUtf8(data) << mime);
+                waitFor(waitMsSetClipboard);
+                RETURN_ON_ERROR( readServerErrors(), "Failed to set or test clipboard content" );
+                return QByteArray();
+            }
+        } while (t.sleep());
+
+        return QString::fromLatin1("Unexpected clipboard data for MIME \"%1\":")
+                .arg(mime).toUtf8()
+                + decorateOutput("Unexpected content", actualBytes)
+                + decorateOutput("Expected content", data)
+                + readServerErrors(ReadAllStderr);
+    }
+
+    QByteArray readServerErrors(ReadStderrFlag flag = ReadErrors) override
+    {
+        if (m_server) {
+            QCoreApplication::processEvents();
+            QByteArray output = readLogFile(maxReadLogSize);
+            if ( flag == ReadAllStderr || !testStderr(output) )
+              return decorateOutput("Server STDERR", output);
+        }
+
+        return QByteArray();
+    }
+
+    QByteArray getClientOutput(const QStringList &arguments, QByteArray *stdoutActual) override
+    {
+        stdoutActual->clear();
+
+        QByteArray stderrActual;
+        int exitCode = run(arguments, stdoutActual, &stderrActual);
+        if ( !testStderr(stderrActual) || exitCode != 0 )
+            return printClienAndServerStderr(stderrActual, exitCode);
+
+        RETURN_ON_ERROR( readServerErrors(), "Failed getting client output" );
+
+        return "";
+    }
+
+    QByteArray waitOnOutput(const QStringList &arguments, const QByteArray &stdoutExpected) override
+    {
+        PerformanceTimer perf;
+        QByteArray stdoutActual;
+
+        SleepTimer t_(8000);
+        do {
+            RETURN_ON_ERROR( getClientOutput(arguments, &stdoutActual), "Failed to wait on client output" );
+        } while (stdoutActual != stdoutExpected && t_.sleep());
+
+        if (stdoutActual == stdoutExpected)
+            return QByteArray();
+
+        return QString::fromLatin1("Unexpected output for command \"%1\":")
+                .arg(arguments.join(' ')).toUtf8()
+                + decorateOutput("Unexpected content", stdoutActual)
+                + decorateOutput("Expected content", stdoutExpected)
+                + readServerErrors(ReadAllStderr);
+    }
+
+    QByteArray cleanupTestCase() override
+    {
+        return cleanup();
+    }
+
+    QByteArray initTestCase() override
+    {
+        return QByteArray();
+    }
+
+    QByteArray init() override
+    {
+        RETURN_ON_ERROR( cleanup(), "Failed to cleanup" );
+
+        // Stop any old server session
+        const QByteArray errors = stopServer();
+        run({"exit"}, nullptr, nullptr, {}, {"COPYQ_WAIT_FOR_SERVER_MS=0"});
+        if ( isServerRunning() )
+            return "Failed to stop an old server session: " + errors;
+        if ( run({""}, nullptr, nullptr, {}, {"COPYQ_WAIT_FOR_SERVER_MS=0"}) == 0 )
+            return "Failed to stop a detached server session: " + errors;
+
+        m_envBeforeTest = m_env;
+
+        // Remove all configuration files and tab data.
+        const auto settingsPaths = {
+            settingsDirectoryPath(),
+            qEnvironmentVariable("COPYQ_SETTINGS_PATH")
+        };
+        for ( const auto &settingsPath : settingsPaths ) {
+            Q_ASSERT( !settingsPath.isEmpty() );
+            QDir settingsDir(settingsPath);
+            const QStringList settingsFileFilters(QStringLiteral("copyq*"));
+            // Omit using dangerous QDir::removeRecursively().
+            for ( const auto &fileName : settingsDir.entryList(settingsFileFilters, QDir::Files) ) {
+                const auto path = settingsDir.absoluteFilePath(fileName);
+                QFile settingsFile(path);
+                if ( settingsFile.exists() && !settingsFile.remove() ) {
+#ifdef Q_OS_WIN
+                    // On Windows, a monitor subprocess may briefly hold
+                    // a lock file after the server exits.
+                    SleepTimer t(5000);
+                    while ( !settingsFile.remove() && t.sleep() ) {}
+                    if ( settingsFile.exists() )
+#endif
+                    return QString::fromLatin1("Failed to remove settings file \"%1\": %2")
+                        .arg(path, settingsFile.errorString())
+                        .toUtf8();
+                }
+            }
+        }
+
+        // Update settings for tests.
+        {
+            Settings settings;
+            settings.clear();
+
+            settings.beginGroup("Options");
+            settings.setValue( QStringLiteral("language"), QStringLiteral("en") );
+            settings.setValue( "clipboard_tab", clipboardTabName );
+            settings.setValue( "close_on_unfocus", false );
+            // Hide the main window even if there is no tray or minimize support.
+            settings.setValue( "hide_main_window", true );
+            // Exercise limiting rows in Process Manager dialog when testing.
+            settings.setValue( "max_process_manager_rows", 4 );
+            // Avoid using external key store.
+            settings.setValue( "use_key_store", false );
+            settings.endGroup();
+
+            if ( !m_settings.isEmpty() ) {
+                const bool pluginsTest = m_testId != defaultTestId;
+
+                if (pluginsTest) {
+                    settings.beginGroup("Plugins");
+                    settings.beginGroup(m_testId);
+                }
+
+                for (auto it = m_settings.constBegin(); it != m_settings.constEnd(); ++it)
+                    settings.setValue( it.key(), it.value() );
+
+                if (pluginsTest) {
+                    settings.endGroup();
+                    settings.endGroup();
+                }
+            }
+        }
+
+        verifyConfiguration();
+
+        // Clear clipboard.
+        RETURN_ON_ERROR( setClipboard({}, ClipboardMode::Clipboard), "Failed to reset clipboard" );
+#ifdef HAS_MOUSE_SELECTIONS
+        RETURN_ON_ERROR( setClipboard({}, ClipboardMode::Selection), "Failed to reset selection" );
+#endif
+
+        if ( !dropLogsToFileCountAndSize(0, 0) )
+            return "Failed to remove log files";
+
+        RETURN_ON_ERROR( startServer(), "Failed to initialize server" );
+
+        // Always show main window first so that the results are consistent with desktop environments
+        // where user cannot hide main window (tiling window managers without tray).
+        RETURN_ON_ERROR( runClient(Args("show"), ""), "Failed to show main window" );
+
+        return QByteArray();
+    }
+
+    QByteArray cleanup() override
+    {
+        m_env = m_envBeforeTest;
+        const QByteArray errors = isServerRunning() ? stopServer() : QByteArray();
+        m_ignoreErrors = {};
+
+        if ( !errors.isEmpty() || QTest::currentTestFailed() )
+            m_failed.append( QString::fromUtf8(QTest::currentTestFunction()) );
+
+        return errors;
+    }
+
+    QString shortcutToRemove() override
+    {
+        return ::shortcutToRemove();
+    }
+
+    void setEnv(const QString &name, const QString &value) override
+    {
+        m_env.insert(name, value);
+    }
+
+    void ignoreErrors(const QRegularExpression &re) override
+    {
+        m_ignoreErrors = re;
+    }
+
+    bool writeOutErrors(const QByteArray &errors) override
+    {
+        if (errors.isEmpty())
+            return false;
+
+        QFile ferr;
+        if ( ferr.open(stderr, QIODevice::WriteOnly) ) {
+            ferr.write(errors);
+            ferr.write("\n");
+            ferr.close();
+        }
+        return true;
+    }
+
+    void setupTest(const QString &id, const QString &allowPlugins, const QVariant &settings)
+    {
+        m_testId = id;
+        m_settings = settings.toMap();
+        m_env.insert("COPYQ_ALLOW_PLUGINS", "*itemtests*,*" + allowPlugins + "*");
+        m_envBeforeTest = m_env;
+    }
+
+    int runTests(QObject *testObject, int argc = 0, char **argv = nullptr)
+    {
+        int exitCode = QTest::qExec(testObject, argc, argv);
+
+        const int maxRuns = m_env.value("COPYQ_TESTS_RERUN_FAILED", "0").toInt();
+        for (int runCounter = 0; exitCode != 0 && !m_failed.isEmpty() && runCounter < maxRuns; ++runCounter) {
+            qInfo() << QString::fromLatin1("Rerunning %1 failed tests (%2/%3): %4")
+                       .arg(m_failed.size())
+                       .arg(runCounter + 1)
+                       .arg(maxRuns)
+                       .arg(m_failed.join(", "));
+            QStringList args = m_failed;
+            m_failed.clear();
+            args.prepend( QString::fromUtf8(argv[0]) );
+            exitCode = QTest::qExec(testObject, args);
+        }
+        m_failed.clear();
+
+        return exitCode;
+    }
+
+private:
+    bool testStderr(const QByteArray &stderrData)
+    {
+        return ::testStderr(stderrData, m_ignoreErrors);
+    }
+
+    void verifyConfiguration()
+    {
+        Settings settings;
+        settings.beginGroup("Options");
+        QCOMPARE( settings.value(QStringLiteral("close_on_unfocus")), false );
+        QCOMPARE( settings.value(QStringLiteral("clipboard_tab")), QString(clipboardTabName) );
+        QCOMPARE( settings.value(QStringLiteral("tabs")).toStringList(), QStringList() );
+    }
+
+    bool startClient(QProcess *p, const QStringList &arguments) override
+    {
+        return startTestProcess(p, arguments);
+    }
+
+    bool startTestProcess(QProcess *p, const QStringList &arguments,
+                          QIODevice::OpenMode mode = QIODevice::ReadWrite,
+                          const QStringList &environment = QStringList())
+    {
+        if ( environment.isEmpty() ) {
+            p->setProcessEnvironment(m_env);
+        } else {
+            auto env = m_env;
+            for (const QString &nameValue : environment) {
+                const auto i = nameValue.indexOf(QLatin1Char('='));
+                Q_ASSERT(i != -1);
+                const auto name = nameValue.left(i);
+                const auto value = nameValue.mid(i+1);
+                env.insert(name, value);
+            }
+            p->setProcessEnvironment(env);
+        }
+
+        p->start( executable(), arguments, mode );
+        return p->waitForStarted(2000);
+    }
+
+    QByteArray waitForServerToStart()
+    {
+        SleepTimer t(15000);
+        do {
+            if ( run(Args() << "") == 0 )
+                return QByteArray();
+        } while ( t.sleep() );
+
+        return "Unable to start server!" + readServerErrors(ReadAllStderr);
+    }
+
+    PlatformClipboard *clipboard()
+    {
+        if (m_clipboard == nullptr)
+            m_clipboard = platformNativeInterface()->clipboard();
+        return m_clipboard.get();
+    }
+
+    std::unique_ptr<QProcess> m_server;
+    QProcessEnvironment m_env;
+    QProcessEnvironment m_envBeforeTest;
+    QString m_testId;
+    QVariantMap m_settings;
+    QRegularExpression m_ignoreErrors;
+
+    QStringList m_failed;
+
+    PlatformClipboardPtr m_clipboard;
+};
+
+} // namespace
+
+Tests::Tests(const TestInterfacePtr &test, QObject *parent)
+    : QObject(parent)
+    , m_test(test)
+{
+}
+
+void Tests::initTestCase()
+{
+    TEST(m_test->initTestCase());
+}
+
+void Tests::cleanupTestCase()
+{
+    TEST(m_test->cleanupTestCase());
+}
+
+void Tests::init()
+{
+    TEST(m_test->init());
+}
+
+void Tests::cleanup()
+{
+    TEST( m_test->cleanup() );
+}
+
+int Tests::run(
+        const QStringList &arguments, QByteArray *stdoutData, QByteArray *stderrData, const QByteArray &in,
+        const QStringList &environment)
+{
+    return m_test->run(arguments, stdoutData, stderrData, in, environment);
+}
+
+bool Tests::hasTab(const QString &tabName)
+{
+    QByteArray out;
+    run(Args("tab"), &out);
+    return splitLines(out).contains(tabName);
+}
+
+int main(int argc, char **argv)
+{
+    // Avoid verbose logs on stderr if tests are not failing
+    qunsetenv("COPYQ_LOG_LEVEL");
+
+    const QString appName = QStringLiteral("copyq.test");
+    QCoreApplication::setOrganizationName(appName);
+    QCoreApplication::setApplicationName(appName);
+    const auto configPath = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    qCInfo(testCategory) << "Using config directory for tests:" << configPath;
+    QDir configDir(configPath);
+    qputenv("COPYQ_SETTINGS_PATH", configPath.toLocal8Bit());
+    qputenv("COPYQ_LOG_FILE", configDir.absoluteFilePath(QStringLiteral("tests.log")).toLocal8Bit());
+    qputenv("COPYQ_ITEM_DATA_PATH", configDir.absoluteFilePath(QStringLiteral("items")).toLocal8Bit());
+
+    QRegularExpression onlyPlugins;
+    bool runPluginTests = true;
+
+    if (argc > 1) {
+        QString arg = argv[1];
+        if (arg.startsWith("PLUGINS:")) {
+            arg.remove(QRegularExpression("^PLUGINS:"));
+            onlyPlugins = QRegularExpression(arg, QRegularExpression::CaseInsensitiveOption);
+            --argc;
+            ++argv;
+        } else {
+            // Omit plugin tests if specific core tests requested.
+            const QString lastArg(argv[argc - 1]);
+            runPluginTests = lastArg.startsWith("-");
+        }
+    }
+
+    setSessionName(sessionName);
+    const auto platform = platformNativeInterface();
+    std::unique_ptr<QGuiApplication> app( platform->createTestApplication(argc, argv) );
+    initSession(app.get(), sessionName);
+
+    // Set higher default tests timeout.
+    // The default value is 5 minutes (in Qt 5.15) which is not enough to run
+    // all tests in Tests class on some systems.
+    bool ok;
+    const int timeout = qEnvironmentVariableIntValue("QTEST_FUNCTION_TIMEOUT", &ok);
+    if (!ok || timeout <= 0)
+        qputenv("QTEST_FUNCTION_TIMEOUT", QByteArray::number(15 * 60 * 1000));
+
+    int exitCode = 0;
+    std::shared_ptr<TestInterfaceImpl> test(new TestInterfaceImpl);
+    const auto runTests = [&](QObject *tests){
+        exitCode = std::max(exitCode, test->runTests(tests, argc, argv));
+        test->stopServer();
+    };
+
+    if (onlyPlugins.pattern().isEmpty()) {
+        test->setupTest("CORE", defaultTestPlugins, QVariant());
+        Tests tc(test);
+        runTests(&tc);
+    }
+
+    if (runPluginTests) {
+        const QList<QObject*> pluginTests{
+            new ItemEncryptedTests(test),
+            new ItemFakeVimTests(test),
+            new ItemImageTests(test),
+            new ItemPinnedTests(test),
+            new ItemSyncTests(test),
+            new ItemTagsTests(test),
+        };
+        for (const auto pluginTest : pluginTests) {
+            const auto pluginId = pluginTest->property("CopyQ_test_id").toString();
+            if ( !pluginId.contains(onlyPlugins) )
+                continue;
+
+            const auto settings = pluginTest->property("CopyQ_test_settings");
+            test->setupTest(pluginId, pluginId, settings);
+            runTests(pluginTest);
+        }
+    }
+
+    return exitCode;
+}

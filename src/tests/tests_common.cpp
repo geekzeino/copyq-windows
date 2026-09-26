@@ -1,0 +1,167 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include "test_utils.h"
+#include "tests/tests_common.h"
+
+#include <QRegularExpression>
+#include <QTemporaryFile>
+
+TemporaryFile::TemporaryFile()
+{
+    QTemporaryFile tmp;
+    tmp.setAutoRemove(false);
+    QVERIFY(tmp.open());
+    m_fileName = tmp.fileName();
+    tmp.close();
+}
+
+TemporaryFile::~TemporaryFile()
+{
+    QFile::remove(m_fileName);
+}
+
+bool testStderr(
+    const QByteArray &stderrData,
+    const QRegularExpression &ignoreRe)
+{
+    static const QRegularExpression reFailure(
+        "(?:^|\n).*(?:Warning:|Warning <.*>:|ERROR:|ERROR <.*>:|ASSERT).*",
+        QRegularExpression::CaseInsensitiveOption);
+
+    const auto plain = [](const char *str){
+        return QRegularExpression(QRegularExpression::escape(QLatin1String(str)));
+    };
+    const auto regex = [](const char *str){
+        return QRegularExpression(QLatin1String(str));
+    };
+    // Ignore exceptions and errors from clients in application log
+    // (these are expected in some tests).
+    static const std::array ignoreList{
+        plain("CopyQ server is already running"),
+        plain("Cannot connect to server! Start CopyQ server first."),
+        plain("Aborting clipboard cloning"),
+        plain("Failed to provide clipboard"),
+        plain("Failed to provide selection"),
+        regex("Warning <.*>: ELAPSED .* ms accessing"),
+        regex("ERROR <.*>: Connection lost!"),
+
+        // Always ignore errors and exceptions from scripts.
+        // These are expected in many test cases.
+        plain("ScriptError:"),
+
+        // X11 (Linux)
+        plain("QXcbXSettings::QXcbXSettings(QXcbScreen*) Failed to get selection owner for XSETTINGS_S atom"),
+        plain("QXcbConnection: XCB error:"),
+        plain("QXcbClipboard: SelectionRequest too old"),
+        plain("libpng warning: iCCP: known incorrect sRGB profile"),
+        plain("QMime::convertToMime: unhandled mimetype: text/plain"),
+        plain("Failed to register with host portal"),
+        plain("Deleting keychain failed"),
+
+        // Wayland (Linux)
+        plain("Wayland does not support QWindow::requestActivate()"),
+        plain("Unexpected wl_keyboard.enter event"),
+        plain("The compositor sent a wl_pointer.enter"),
+        plain("QObject::connect: No such signal QPlatformNativeInterface::systemTrayWindowChanged(QScreen*)"),
+        plain("Could not init WaylandClipboard, falling back to QtClipboard."),
+
+        // KDE Frameworks (Linux)
+        plain("[kf.notifications]"),
+        plain("[kf.statusnotifieritem]"),
+
+        // Windows
+        plain("QWindowsPipeWriter: write failed"),
+        plain("QWindowsWindow::setGeometry: Unable to set geometry"),
+        plain("QWinEventNotifier: no event dispatcher, application shutting down? Cannot deliver event."),
+        plain("setGeometry: Unable to set geometry"),
+        plain("Failed to raise: "),
+        plain("[qt.qpa.mime] Retrying to obtain clipboard."),
+        plain("[qt.qpa.mime] Unable to obtain clipboard."),
+        plain("[default] QSystemTrayIcon::setVisible: No Icon set"),
+
+        plain("[kf.notifications] Received a response for an unknown notification."),
+        // KStatusNotifierItem
+        plain("[kf.windowsystem] Could not find any platform plugin"),
+
+        regex("QTemporaryDir: Unable to remove .* most likely due to the presence of read-only files."),
+
+        // macOS
+        plain("Failed to get QCocoaScreen for NSObject(0x0)"),
+        plain("ERROR: Failed to open session mutex: QSystemSemaphore::handle:: ftok failed"),
+        plain("Warning: [qt.tlsbackend.ossl] Failed to load libssl/libcrypto."),
+        regex(R"(Window position.* outside any known screen.*)"),
+        regex(R"(Populating font family aliases took .* ms. Replace uses of missing font family "Font Awesome.*" with one that exists to avoid this cost.)"),
+
+        // New in Qt 5.15.0
+        regex(R"(Populating font family aliases took .* ms. Replace uses of missing font family "Monospace" with one that exists to avoid this cost.)"),
+
+        // New in Qt 6.5
+        regex("Error in contacting registry"),
+
+        // KNotification bug
+        plain(R"(QLayout: Attempting to add QLayout "" to QWidget "", which already has a layout)"),
+
+        // Warnings from itemsync plugin, not sure what it causes
+        regex(R"(Could not remove our own lock file .* maybe permissions changed meanwhile)"),
+    };
+
+    const QString output = QString::fromUtf8(stderrData);
+    QRegularExpressionMatchIterator it = reFailure.globalMatch(output);
+    bool result = true;
+    const bool isIgnoreReValid = !ignoreRe.pattern().isEmpty();
+    while ( it.hasNext() ) {
+        const auto match = it.next();
+        const QString log = match.captured();
+
+        const bool ignore = (isIgnoreReValid && log.contains(ignoreRe))
+            || std::any_of(
+                std::begin(ignoreList), std::end(ignoreList),
+                    [&log](const QRegularExpression &reIgnore){
+                        return log.contains(reIgnore);
+                    });
+
+        if (!ignore) {
+            qWarning() << "🛑 Failure in logs:" << log.trimmed();
+            result = false;
+        }
+    }
+
+    if (!result && isIgnoreReValid)
+        qWarning().noquote() << "🟡 Ignored logs matching:" << ignoreRe.pattern();
+
+    return result;
+}
+
+int count(const QStringList &items, const QString &pattern)
+{
+    int from = -1;
+    int count = 0;
+    const QRegularExpression re(pattern);
+    while ( (from = items.indexOf(re, from + 1)) != -1 )
+        ++count;
+    return count;
+}
+
+QStringList splitLines(const QByteArray &nativeText)
+{
+    return QString::fromUtf8(nativeText).split(QRegularExpression("\r\n|\n|\r"));
+}
+
+QByteArray generateData()
+{
+    static int i = 0;
+    const QByteArray id = "tests_"
+            + QByteArray::number(QDateTime::currentMSecsSinceEpoch() % 1000);
+    return id + '_' + QByteArray::number(++i);
+}
+
+QString appWindowTitle(const QString &text)
+{
+#ifdef Q_OS_MAC
+    return QStringLiteral("CopyQ - %1\n").arg(text);
+#elif defined(Q_OS_WIN)
+    return QStringLiteral("%1 - CopyQ-%2\n").arg(text, sessionName);
+#else
+    return QStringLiteral("%1 — CopyQ-%2\n").arg(text, sessionName);
+#endif
+}

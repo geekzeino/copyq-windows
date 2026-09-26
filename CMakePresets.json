@@ -1,0 +1,126 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "Debug",
+            "generator": "Ninja",
+            "binaryDir": "${sourceParentDir}/build/copyq/${presetName}",
+            "installDir": "${sourceParentDir}/install/copyq/${presetName}",
+            "cacheVariables": {
+                "WITH_TESTS": "TRUE",
+                "WITH_QCA_ENCRYPTION": "TRUE",
+                "PEDANTIC": "TRUE",
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+                "CMAKE_CXX_COMPILER_LAUNCHER": "ccache"
+            }
+        },
+        {
+            "name": "macOS-10",
+            "generator": "Ninja",
+            "binaryDir": "${sourceParentDir}/build/copyq/${presetName}",
+            "installDir": "${sourceParentDir}/build/copyq/${presetName}",
+            "cacheVariables": {
+                "WITH_QT6": "TRUE",
+                "WITH_TESTS": "TRUE",
+                "CMAKE_PREFIX_PATH": "$penv{CMAKE_PREFIX_PATH}",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "10.15",
+                "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+                "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
+                "CMAKE_CXX_FLAGS": "-Wno-deprecated-declarations"
+            }
+        },
+        {
+            "name": "macOS-13",
+            "generator": "Ninja",
+            "binaryDir": "${sourceParentDir}/build/copyq/${presetName}",
+            "installDir": "${sourceParentDir}/build/copyq/${presetName}",
+            "cacheVariables": {
+                "WITH_QT6": "TRUE",
+                "WITH_TESTS": "TRUE",
+                "CMAKE_PREFIX_PATH": "$penv{CMAKE_PREFIX_PATH}",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0",
+                "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+                "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
+                "CMAKE_CXX_FLAGS": "-Wno-deprecated-declarations"
+            }
+        },
+        {
+            "name": "macOS-12-m1",
+            "generator": "Ninja",
+            "binaryDir": "${sourceParentDir}/build/copyq/${presetName}",
+            "installDir": "${sourceParentDir}/build/copyq/${presetName}",
+            "cacheVariables": {
+                "WITH_QT6": "TRUE",
+                "WITH_TESTS": "TRUE",
+                "CMAKE_PREFIX_PATH": "$penv{CMAKE_PREFIX_PATH}",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "12",
+                "CMAKE_OSX_ARCHITECTURES": "arm64",
+                "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+                "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
+                "CMAKE_CXX_FLAGS": "-Wno-deprecated-declarations"
+            }
+        },
+        {
+            "name": "Windows",
+            "generator": "Ninja",
+            "binaryDir": "${sourceParentDir}/build/copyq/${presetName}",
+            "installDir": "${sourceParentDir}/install/copyq/${presetName}",
+            "cacheVariables": {
+                "WITH_QT6": "TRUE",
+                "WITH_TESTS": "TRUE",
+                "CMAKE_PREFIX_PATH": "$penv{CMAKE_PREFIX_PATH}",
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_C_COMPILER_LAUNCHER": "sccache",
+                "CMAKE_CXX_COMPILER_LAUNCHER": "sccache",
+                "CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION": "."
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "Debug",
+            "configurePreset": "Debug",
+            "configuration": "Debug",
+            "targets": "install"
+        },
+        {
+            "name": "macOS-10",
+            "configurePreset": "macOS-10",
+            "configuration": "Release",
+            "targets": "install"
+        },
+        {
+            "name": "macOS-13",
+            "configurePreset": "macOS-13",
+            "configuration": "Release",
+            "targets": "install"
+        },
+        {
+            "name": "macOS-12-m1",
+            "configurePreset": "macOS-12-m1",
+            "configuration": "Release",
+            "targets": "install"
+        },
+        {
+            "name": "Windows",
+            "configurePreset": "Windows",
+            "configuration": "Release",
+            "targets": "install"
+        }
+    ],
+    "packagePresets": [
+        {
+            "name": "macOS-10",
+            "configurePreset": "macOS-10"
+        },
+        {
+            "name": "macOS-13",
+            "configurePreset": "macOS-13"
+        },
+        {
+            "name": "macOS-12-m1",
+            "configurePreset": "macOS-12-m1"
+        }
+    ]
+}
